@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "michaeldewildt.ninfer-gauge",
+  "name": "NInfer Gauge",
+  "version": "0.1.0",
+  "author": "Michael De Wildt",
+  "license": "MIT",
+  "description": "Health and live throughput of the local NInfer inference server.",
+  "kinds": ["bar-widget"],
+  "activation": "on-demand",
+  "entryPoints": { "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "NInfer Gauge",
+    "description": "State and decode rate for the local ninfer service; live tiles, previous runs, and the boot parameters in a two-tab popout.",
+    "category": "AI",
+    "aliases": ["ninfer-gauge", "ninfer"],
+    "allowMultiple": false,
+    "defaults": { "refreshMs": 1000, "gpuIndex": 0, "showGpu": true, "showAccept": true },
+    "schema": [
+      { "key": "refreshMs", "type": "integer", "label": "Refresh (ms)", "min": 500, "max": 10000, "step": 500 },
+      { "key": "gpuIndex", "type": "integer", "label": "GPU index" },
+      { "key": "showGpu", "type": "boolean", "label": "Run nvidia-smi on the collector (--no-gpu when off)" },
+      { "key": "showAccept", "type": "boolean", "label": "Speculative accept (bar alarm)" },
+      { "key": "statePath", "type": "string", "label": "State file path" }
+    ]
+  }
+}

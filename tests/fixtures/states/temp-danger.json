@@ -1,0 +1,139 @@
+{
+  "schema_version": 12,
+  "server": {
+    "state": "busy",
+    "healthy": true,
+    "active_state": null,
+    "invocation_id": null,
+    "model": null,
+    "port": 8080,
+    "boot": null,
+    "active_requests": 2,
+    "queued_requests": 0,
+    "decode_tok_s": 193.4,
+    "prefill_tok_s": 8330.0,
+    "avg_batch": 1.0,
+    "host_pct": 2.9,
+    "host_work_ms": 147.0,
+    "last_activity_at_ms": 1789072658250,
+    "last_sample_at_ms": 1789072656086,
+    "stale": false
+  },
+  "gpu": {
+    "stale": false,
+    "history": [
+      8,
+      11,
+      39,
+      44,
+      41,
+      45,
+      43,
+      40,
+      44,
+      42,
+      41,
+      42
+    ],
+    "index": 0,
+    "util_pct": 42,
+    "mem_mib": 29956,
+    "mem_total_mib": 32607,
+    "process_mem_mib": 28960,
+    "temp_c": 88,
+    "watts": 402.1,
+    "name": "NVIDIA GeForce RTX 5090"
+  },
+  "requests": {
+    "total_this_invocation": 1162,
+    "failed": 2,
+    "rejected": 2,
+    "client_disconnects": 3,
+    "accept_pct": 35.3,
+    "accept_alarm": false
+  },
+  "config": {
+    "model": "qwen3.8-27b",
+    "weight_profile": "nvfp4",
+    "max_context_tokens": 131072,
+    "kv_dtype": "fp8",
+    "kv_capacity_tokens": 181568,
+    "max_concurrency": 2,
+    "mtp_draft_tokens": 7,
+    "lm_head_draft": true,
+    "gpu": "NVIDIA GeForce RTX 5090",
+    "endpoint": "127.0.0.1:8080",
+    "weights_gib": 21.4,
+    "kv_gib": 7.31,
+    "host_kv_gib": 32.0,
+    "host_state_gib": 5.84
+  },
+  "runs": [
+    {
+      "completed_at_ms": 1789036540000,
+      "duration_ms": 48000,
+      "when_label": "2m ago",
+      "tok_s_avg": 187.2,
+      "tok_s_max": 210.4,
+      "accept_pct_avg": 64.1,
+      "accept_pct_max": 71.3,
+      "temp_avg_c": 48.2,
+      "temp_max_c": 52.9,
+      "queue_wait_ms_avg": 1100.0,
+      "queue_wait_ms_max": 1800.0
+    },
+    {
+      "completed_at_ms": 1789035940000,
+      "duration_ms": 300000,
+      "when_label": "12m ago",
+      "tok_s_avg": 176.9,
+      "tok_s_max": 198.0,
+      "accept_pct_avg": 61.4,
+      "accept_pct_max": 66.8,
+      "temp_avg_c": 46.1,
+      "temp_max_c": 49.3,
+      "queue_wait_ms_avg": null,
+      "queue_wait_ms_max": null
+    },
+    {
+      "completed_at_ms": 1789031260000,
+      "duration_ms": 920000,
+      "when_label": "2h ago",
+      "tok_s_avg": 152.6,
+      "tok_s_max": 171.2,
+      "accept_pct_avg": 58.0,
+      "accept_pct_max": 63.4,
+      "temp_avg_c": 44.0,
+      "temp_max_c": 47.8,
+      "queue_wait_ms_avg": 420.0,
+      "queue_wait_ms_max": 420.0
+    }
+  ],
+  "history": {
+    "window_sec": 60,
+    "decode_tok_s": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "debug": {
+    "unseen_events": [],
+    "journal_error": null,
+    "health_error": null,
+    "health_status": null,
+    "gpu_error": null,
+    "unit_error": null,
+    "last_journal_ok_ms": null
+  },
+  "generated_at_ms": 1789036660000
+}

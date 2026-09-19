@@ -1,0 +1,113 @@
+{
+  "schema_version": 12,
+  "server": {
+    "state": "idle",
+    "healthy": true,
+    "active_state": "active",
+    "invocation_id": null,
+    "model": null,
+    "port": 8080,
+    "boot": null,
+    "active_requests": 0,
+    "queued_requests": 0,
+    "decode_tok_s": 0.0,
+    "prefill_tok_s": null,
+    "avg_batch": null,
+    "host_pct": null,
+    "host_work_ms": null,
+    "last_activity_at_ms": 1789072658250,
+    "last_sample_at_ms": 1789072656086,
+    "stale": false
+  },
+  "gpu": {
+    "stale": false,
+    "history": [
+      41,
+      38,
+      12,
+      4,
+      3,
+      2,
+      3,
+      3,
+      2,
+      3,
+      3,
+      3
+    ],
+    "index": 0,
+    "util_pct": 3,
+    "mem_mib": 29956,
+    "mem_total_mib": 32607,
+    "process_mem_mib": 28960,
+    "temp_c": 47,
+    "watts": 186.4,
+    "name": "NVIDIA GeForce RTX 5090"
+  },
+  "requests": {
+    "total_this_invocation": 1162,
+    "failed": 2,
+    "rejected": 2,
+    "client_disconnects": 3,
+    "accept_pct": 35.3,
+    "accept_alarm": false
+  },
+  "config": {
+    "model": "qwen3.8-27b",
+    "weight_profile": "nvfp4",
+    "max_context_tokens": 131072,
+    "kv_dtype": "fp8",
+    "kv_capacity_tokens": 181568,
+    "max_concurrency": 2,
+    "mtp_draft_tokens": 7,
+    "lm_head_draft": true,
+    "gpu": "NVIDIA GeForce RTX 5090",
+    "endpoint": "127.0.0.1:8080",
+    "weights_gib": 21.4,
+    "kv_gib": 7.31,
+    "host_kv_gib": 32.0,
+    "host_state_gib": 5.84
+  },
+  "runs": [],
+  "history": {
+    "window_sec": 60,
+    "decode_tok_s": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "decode_tokens": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ]
+  },
+  "debug": {
+    "unseen_events": [],
+    "journal_error": null,
+    "health_error": null,
+    "health_status": null,
+    "gpu_error": null,
+    "unit_error": null,
+    "last_journal_ok_ms": null
+  },
+  "generated_at_ms": 1789036660000
+}

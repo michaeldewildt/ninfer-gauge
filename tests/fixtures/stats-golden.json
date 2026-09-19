@@ -1,0 +1,79 @@
+{
+  "schema_version": 12,
+  "server": {
+    "state": "queued",
+    "healthy": false,
+    "active_state": null,
+    "invocation_id": null,
+    "model": null,
+    "port": 8080,
+    "boot": null,
+    "active_requests": 1,
+    "queued_requests": 1,
+    "decode_tok_s": 224.8,
+    "prefill_tok_s": null,
+    "avg_batch": 1.0,
+    "host_pct": 0.1,
+    "host_work_ms": 3.98,
+    "last_activity_at_ms": 1789072658250,
+    "last_sample_at_ms": 1789072656086,
+    "stale": false
+  },
+  "gpu": {
+    "stale": true,
+    "history": [],
+    "index": 0
+  },
+  "requests": {
+    "total_this_invocation": 1162,
+    "failed": 2,
+    "rejected": 2,
+    "client_disconnects": 3,
+    "accept_pct": 35.3,
+    "accept_alarm": false
+  },
+  "config": {
+    "model": "qwen3.8-27b",
+    "weight_profile": "nvfp4",
+    "max_context_tokens": null,
+    "kv_dtype": null,
+    "kv_capacity_tokens": null,
+    "max_concurrency": null,
+    "mtp_draft_tokens": null,
+    "lm_head_draft": null,
+    "gpu": null,
+    "endpoint": "127.0.0.1:8080",
+    "weights_gib": 21.4,
+    "kv_gib": 7.31,
+    "host_kv_gib": 32.0,
+    "host_state_gib": 5.84
+  },
+  "runs": [],
+  "history": {
+    "window_sec": 60,
+    "decode_tok_s": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "debug": {
+    "unseen_events": [],
+    "journal_error": null,
+    "health_error": null,
+    "health_status": null,
+    "gpu_error": null,
+    "unit_error": null,
+    "last_journal_ok_ms": null
+  },
+  "generated_at_ms": 1789036660000
+}

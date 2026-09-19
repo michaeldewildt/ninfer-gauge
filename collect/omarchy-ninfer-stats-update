@@ -1,0 +1,1582 @@
+#!/usr/bin/env python3
+"""Collect NInfer server health, throughput and GPU stats into a state file.
+
+Spawned once per refresh by the plugin's Main.qml (no daemon): read the
+journal cursor, sample whichever sources are due, merge over the previous
+state, write stats.json atomically, exit. A crash here must be
+indistinguishable from a quiet server -- the widget reads staleness off the
+file, never off our exit code.
+
+Sources and their cadences (the QML timer fires at 1 Hz; we decide):
+  journal    every tick   journalctl --user -u ninfer -o json --after-cursor
+  health     2 s          GET /health -- any HTTP response means alive
+  gpu        3 s          nvidia-smi (100-300 ms of driver time; not 1 Hz)
+"""
+
+import argparse
+import calendar
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+SCHEMA_VERSION = 12
+
+BUCKET_MS = 5000            # throughput lines land on 5 s wall-clock buckets
+HISTORY_BUCKETS = 12        # ... 12 of them = the 60 s sparkline
+GPU_HISTORY = 12
+RUNS_KEEP = 5               # previous-runs ring, newest first
+TEMP_SAMPLES_KEEP = 600     # 30 min of 3 s GPU samples: the per-run temp fold
+DECODE_WINDOW_MS = 5000     # the bucket fallback for server.decode_tok_s averages over this
+ACTIVITY_FRESH_MS = 15000   # older throughput sample => not busy any more
+RUN_SETTLE_MS = 60_000      # settle grace: the run's end waits this long for the verdict to stay settled; 0 = same-tick close
+UNIT_EVERY_MS = 2000        # ActiveState only moves on start/stop/fail
+HEALTH_EVERY_MS = 2000
+GPU_EVERY_MS = 3000
+GPU_PROCESS_EVERY_MS = 15000   # who owns the VRAM changes far slower than how much
+JOURNAL_STALE_MS = 30000    # journal failing this long feeds the down verdict
+RESET_PROBE_MS = 60000      # silence this long => check the journal head
+CATCHUP_LINES = 200         # re-read this many on a cursor reset
+QUEUE_WAIT_FLOOR_MS = 100   # below this a request "did not queue"; the run's wait avg counts only the rest (the same 100 ms as QUEUE_WAIT_MIN_MS in format.js)
+PENDING_CAP = 128
+BUCKET_KEEP = HISTORY_BUCKETS + 2   # everything older than the window is dead
+ACCEPT_ALARM_PCT = 25.0     # spec-accept tint threshold
+ACCEPT_ALARM_N = 5
+TASK_PROFILE_MAX = 32   # the emitted task profile is at most this many buckets
+PROFILE_TRIGGER = TASK_PROFILE_MAX * 2   # coarsen in place past this
+PROFILE_MAX_SPAN_MS = 600000   # a longer decode interval is dropped at the head, tokens and time alike
+
+NO_UNIT = {"active_state": None, "invocation_id": None, "pid": None, "error": None}
+
+DEFAULT_UNIT = "ninfer"
+DEFAULT_PORT = 8080
+
+
+# --------------------------------------------------------------- scalars
+
+def _clean(text):
+    return text.replace(",", "") if text else text
+
+
+def to_float(text):
+    try:
+        return float(_clean(text))
+    except (TypeError, ValueError):
+        return None
+
+
+def to_int(text):
+    value = to_float(text)
+    return None if value is None else int(value)
+
+
+def to_rate(number, suffix):
+    """`3.05k tok/s` reads as 3050.0; a bare number reads as itself."""
+    value = to_float(number)
+    if value is None:
+        return None
+    return value * 1000.0 if suffix == "k" else value
+
+
+_DUR_RE = re.compile(r"([\d,.]+)\s*(us|ms|s)\b")
+
+
+def to_ms(text):
+    """`5.3s` / `621 ms` / `667 us` -> milliseconds."""
+    if not text:
+        return None
+    match = _DUR_RE.search(text)
+    if not match:
+        return None
+    value = to_float(match.group(1))
+    if value is None:
+        return None
+    unit = match.group(2)
+    if unit == "s":
+        return value * 1000.0
+    if unit == "us":
+        return value / 1000.0
+    return value
+
+
+# ------------------------------------------------------------- line shapes
+#
+# Anchors, not a grammar: every field after the anchor gets its own optional
+# regex, and a field that does not match is null rather than a parse failure.
+# The app's own `TIMESTAMP LEVEL ` prefix is stripped first.
+
+PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+\s+([A-Z]+)\s+(.*)$")
+STARTED_RE = re.compile(r"^req#(\d+) started \|(.*)$")
+# Context the `started` line carries that the `done` line never repeats.
+# `thinking` must have a word after it: `preserve thinking` is a flag, not a level.
+STARTED_MESSAGES_RE = re.compile(r"\b(\d+) messages\b")
+STARTED_THINKING_RE = re.compile(r"\bthinking ([a-z]+)\b")
+STARTED_TOOLS_RE = re.compile(r"\btools (\d+)\b")
+DONE_RE = re.compile(r"^req#(\d+) done \|(.*)$")
+TERMINAL_RE = re.compile(
+    r"^req#(\d+) (rejected|failed|cancelled|response failed) during (\w+)\s*\|(.*)$")
+UNKNOWN_REQ_RE = re.compile(r"^req#(\d+) ([a-z][a-z ]*?)(?: \||$)")
+THROUGHPUT_RE = re.compile(r"^throughput \|(.*)$")
+
+PROMPT_RE = re.compile(r"\bprompt ([\d,]+)")
+OUTPUT_RE = re.compile(r"\boutput ([\d,]+)")
+CACHE_RE = re.compile(r"\bcache [\d,]+ \(([\d.]+)%")
+TTFT_RE = re.compile(r"\bTTFT ([\d,.]+\s*(?:us|ms|s))")
+TOTAL_RE = re.compile(r"\btotal ([\d,.]+\s*(?:us|ms|s))")
+QUEUE_RE = re.compile(r"\bqueue ([\d,.]+\s*(?:us|ms|s))")
+PREFILL_RATE_RE = re.compile(r"\bprefill ([\d,.]+)(k?) tok/s")
+DECODE_RATE_RE = re.compile(r"\bdecode ([\d,.]+)(k?) tok/s")
+PREFILL_TOK_RE = re.compile(r"\bprefill [\d,.]+k? tok/s \(([\d,]+) tok\)")
+DECODE_TOK_RE = re.compile(r"\bdecode [\d,.]+k? tok/s \(([\d,]+) tok\)")
+SPEC_RE = re.compile(r"\b(\w+) accepted ([\d,]+)/([\d,]+) \(([\d.]+)%\)")
+INTERVAL_RE = re.compile(r"^\s*([\d,.]+)s\s*$")
+RUNNING_RE = re.compile(r"\brunning (\d+)")
+WAITING_RE = re.compile(r"\bwaiting (\d+)")
+BATCH_RE = re.compile(r"\bbatch ([\d.]+)")
+HOST_RE = re.compile(r"\bhost ([\d.]+)%(?:\s*\(([\d,.]+\s*(?:us|ms|s))\))?")
+HTTP_RE = re.compile(r"\bHTTP (\d{3})\b")
+MODEL_CMDLINE_RE = re.compile(r"models/([\w.\-]+?)(?:\.ninfer)?(?:\s|$)")
+# The artifact's trailing token is the weight quantisation (nvfp4, ...).
+# A hint only: the engine's own `engine ready` line is authoritative, and
+# the KV dtype flag is a different knob, so the hint never wins over it.
+WEIGHT_PROFILE_HINT_RE = re.compile(
+    r"_(nvfp4|nvfp8|int8|bf16|fp8|k8v4|k4v4)\Z")
+PORT_CMDLINE_RE = re.compile(r"--port\s+(\d+)")
+# The engine's own identity line: `engine ready | qwen3.8-27b/nvfp4 | ...`
+# -- model id and weight profile in the server's own words, not the artifact
+# file name.
+ENGINE_READY_RE = re.compile(r"^engine ready \| ([\w.\-]+?)/([\w.\-]+)")
+# The boot memory budget, in the engine's own words: what the boot
+# parameters committed, measured at boot. Only the settled numbers count --
+# `pinned`, not `pinning`; `weights ready`, not `loading weights`.
+ENGINE_READY_WEIGHTS_RE = re.compile(r"\| weights ([\d,.]+) GiB\b")
+WEIGHTS_READY_RE = re.compile(r"^weights ready \| ([\d,.]+) GiB")
+CAPACITY_RE = re.compile(
+    r"^capacity \| KV [\d,]+ tokens, \w+, \w+ \| pages [\d,]+/[\d,]+ \| "
+    r"runtime ([\d,.]+) GiB")
+HOST_PIN_RE = re.compile(r"^host (KV|state) pinned \| ([\d,.]+) GiB")
+
+
+def parse_boot(cmdline):
+    """What the binary was loaded with, in command-line order.
+
+    The journal's _CMDLINE of the serve process is the only source: it is
+    the invocation, not a guess. The first positional after the binary is
+    the model path; every --flag takes the next token as its value unless
+    that token is a flag (or there is none), which reads as a boolean.
+    Numbers come out as numbers. A line that is not the serve line (no
+    models/ token) is refused -- the ExecStartPre nvidia-smi wait and the
+    shell wrapper also carry cmdlines.
+    """
+    if not MODEL_CMDLINE_RE.search(cmdline):
+        return None
+    tokens = cmdline.split()
+    boot = {}
+    i = 0
+    while i < len(tokens) and not tokens[i].startswith("--"):
+        if i > 0 and "model" not in boot:
+            boot["model"] = tokens[i]
+        i += 1
+    while i < len(tokens):
+        flag = tokens[i][2:]
+        if i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
+            value = tokens[i + 1]
+            i += 2
+        else:
+            value = True
+            i += 1
+        if isinstance(value, str) and value.isdigit():
+            value = int(value)
+        boot[flag] = value
+    return boot
+
+
+def split_prefix(message):
+    """-> (level, body). Lines without the app prefix keep their whole text."""
+    match = PREFIX_RE.match(message)
+    if match:
+        return match.group(1), match.group(2)
+    return None, message
+
+
+def _segments(tail):
+    return [part.strip() for part in tail.split("|")]
+
+
+def _spec_fields(tail):
+    match = SPEC_RE.search(tail)
+    if not match:
+        return {"spec_backend": None, "spec_accepted": None,
+                "spec_drafts": None, "spec_pct": None}
+    return {
+        "spec_backend": match.group(1),
+        "spec_accepted": to_int(match.group(2)),
+        "spec_drafts": to_int(match.group(3)),
+        "spec_pct": to_float(match.group(4)),
+    }
+
+
+def _search(pattern, tail, convert=to_int):
+    match = pattern.search(tail)
+    return convert(match.group(1)) if match else None
+
+
+def parse_message(message):
+    """One journal MESSAGE -> an event dict, or None when we do not care."""
+    level, body = split_prefix(message)
+
+    match = DONE_RE.match(body)
+    if match:
+        tail = match.group(2)
+        parts = _segments(tail)
+        event = {
+            "kind": "done",
+            "level": level,
+            "id": int(match.group(1)),
+            # `... done | openai-chat | tool calls 1 | prompt ...`
+            "endpoint": parts[0] if len(parts) > 0 and parts[0] else None,
+            "outcome": parts[1] if len(parts) > 1 and parts[1] else None,
+            "prompt_tokens": _search(PROMPT_RE, tail),
+            "output_tokens": _search(OUTPUT_RE, tail),
+            "cache_pct": _search(CACHE_RE, tail, to_float),
+            "ttft_ms": _search(TTFT_RE, tail, to_ms),
+            "total_ms": _search(TOTAL_RE, tail, to_ms),
+            # `queue N ms` is logged only when non-zero: absent means zero.
+            "queue_ms": _search(QUEUE_RE, tail, to_ms) or 0.0,
+        }
+        rate = PREFILL_RATE_RE.search(tail)
+        event["prefill_tok_s"] = to_rate(rate.group(1), rate.group(2)) if rate else None
+        rate = DECODE_RATE_RE.search(tail)
+        event["decode_tok_s"] = to_rate(rate.group(1), rate.group(2)) if rate else None
+        event.update(_spec_fields(tail))
+        return event
+
+    match = STARTED_RE.match(body)
+    if match:
+        parts = _segments(match.group(2))
+        tail = match.group(2)
+        endpoint = parts[0] if parts else ""
+        return {
+            "kind": "started",
+            "level": level,
+            "id": int(match.group(1)),
+            "endpoint": endpoint.split(" ")[0] if endpoint else None,
+            "stream": "non-stream" not in endpoint and "stream" in endpoint,
+            "messages": _search(STARTED_MESSAGES_RE, tail),
+            "thinking": _search(STARTED_THINKING_RE, tail, str),
+            "tools": _search(STARTED_TOOLS_RE, tail),
+        }
+
+    match = TERMINAL_RE.match(body)
+    if match:
+        tail = match.group(4)
+        parts = _segments(tail)
+        http = _search(HTTP_RE, tail)
+        # `| openai-chat | HTTP 499 | client disconnected` -- but the
+        # `response failed` shape drops the endpoint segment entirely, so the
+        # HTTP segment is the landmark: endpoint before it, reason after.
+        http_index = next((index for index, part in enumerate(parts)
+                           if part.startswith("HTTP ")), -1)
+        endpoint = None
+        reason = None
+        if http_index > 0 and parts[0]:
+            endpoint = parts[0].split(" ")[0]
+        if http_index >= 0 and len(parts) > http_index + 1:
+            reason = parts[http_index + 1] or None
+        return {
+            "kind": "terminal",
+            "level": level,
+            "id": int(match.group(1)),
+            "verb": match.group(2),
+            "phase": match.group(3),
+            "endpoint": endpoint,
+            "http": http,
+            "reason": reason,
+        }
+
+    match = THROUGHPUT_RE.match(body)
+    if match:
+        tail = match.group(1)
+        parts = _segments(tail)
+        interval = None
+        if parts:
+            interval_match = INTERVAL_RE.match(parts[0])
+            if interval_match:
+                interval = to_float(interval_match.group(1))
+        rate = PREFILL_RATE_RE.search(tail)
+        prefill_rate = to_rate(rate.group(1), rate.group(2)) if rate else None
+        rate = DECODE_RATE_RE.search(tail)
+        decode_rate = to_rate(rate.group(1), rate.group(2)) if rate else None
+        host = HOST_RE.search(tail)
+        return {
+            "kind": "throughput",
+            "level": level,
+            "interval_sec": interval,
+            "prefill_tok_s": prefill_rate,
+            "decode_tok_s": decode_rate,
+            "prefill_tokens": _search(PREFILL_TOK_RE, tail),
+            "decode_tokens": _search(DECODE_TOK_RE, tail),
+            "running": _search(RUNNING_RE, tail),
+            "waiting": _search(WAITING_RE, tail) or 0,
+            "batch": _search(BATCH_RE, tail, to_float),
+            "host_pct": to_float(host.group(1)) if host else None,
+            "host_work_ms": to_ms(host.group(2)) if host and host.group(2) else None,
+        }
+
+    match = UNKNOWN_REQ_RE.match(body)
+    if match:
+        return {"kind": "unseen", "level": level,
+                "id": int(match.group(1)), "verb": match.group(2).strip()}
+
+    match = ENGINE_READY_RE.match(body)
+    if match:
+        # `engine ready | qwen3.8-27b/nvfp4 | ...`: the model id and weight
+        # profile in the server's own words, once per boot -- and, when the
+        # line carries it, the weights' own footprint.
+        event = {"kind": "engine_ready", "level": level,
+                 "model": match.group(1), "profile": match.group(2)}
+        weights = ENGINE_READY_WEIGHTS_RE.search(body)
+        if weights:
+            event["weights_gib"] = to_float(weights.group(1))
+        return event
+
+    match = WEIGHTS_READY_RE.match(body)
+    if match:
+        return {"kind": "weights_ready", "level": level,
+                "gib": to_float(match.group(1))}
+
+    match = CAPACITY_RE.match(body)
+    if match:
+        return {"kind": "capacity", "level": level,
+                "runtime_gib": to_float(match.group(1))}
+
+    match = HOST_PIN_RE.match(body)
+    if match:
+        return {"kind": "host_pinned", "level": level,
+                "what": match.group(1).lower(),
+                "gib": to_float(match.group(2))}
+
+    return None
+
+
+# ----------------------------------------------------------------- sources
+
+_STARTED_MS = 0
+
+
+def now_ms():
+    return int(time.time() * 1000)
+
+
+def age_label(ms):
+    """`2 min ago` for the previous-runs table -- the QML's fmtAge, so the
+    same reading comes out of both sides of the display rule."""
+    if ms is None:
+        return None
+    n = max(0, int(ms))
+    if n < 1000:
+        return "now"
+    if n < 60000:
+        return "%ds ago" % int(n / 1000.0 + 0.5)
+    if n < 3600000:
+        return "%dm ago" % int(n / 60000.0 + 0.5)
+    return "%dh ago" % int(n / 3600000.0 + 0.5)
+
+
+def classify_http(code):
+    """5xx is our failure, 499 is the client hanging up, other 4xx is theirs.
+
+    Clients emit 499s routinely (interrupted requests, aborted streams,
+    teardown); counting those as errors would keep the widget permanently
+    alarmed about nothing.
+    """
+    if code is None:
+        return None
+    if code >= 500:
+        return "failed"
+    if code == 499:
+        return "client_disconnects"
+    if code >= 400:
+        return "rejected"
+    return None
+
+
+def run_command(command, timeout=5.0):
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True,
+                                   timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as error:
+        return None, str(error)
+    if completed.returncode != 0:
+        detail = (completed.stderr or "").strip() or ("exit %d" % completed.returncode)
+        return None, detail
+    return completed.stdout, None
+
+
+def probe_unit(unit):
+    """ActiveState + InvocationID + MainPID in one call.
+
+    (`Invocations` is not a systemd property; `InvocationID` is. The PID is
+    what lets the GPU card say whether the VRAM it shows is NInfer's or the
+    whole card's -- a desktop compositor shares this GPU.)
+    """
+    out, error = run_command(
+        ["systemctl", "--user", "show", "-p", "ActiveState", "-p", "InvocationID",
+         "-p", "MainPID", "--value", unit])
+    if out is None:
+        return {"active_state": None, "invocation_id": None, "pid": None, "error": error}
+    lines = [line.strip() for line in out.splitlines()]
+    while len(lines) < 3:
+        lines.append("")
+    return {
+        # `show --value` prints the properties in the order systemd lists
+        # them, which is alphabetical: ActiveState, InvocationID, MainPID.
+        "active_state": lines[0] or None,
+        "invocation_id": lines[1] or None,
+        "pid": to_int(lines[2]) or None,
+        "error": None,
+    }
+
+
+def decode_message(raw):
+    if isinstance(raw, list):
+        try:
+            return bytes(raw).decode("utf-8", "replace")
+        except (TypeError, ValueError):
+            return ""
+    return str(raw or "")
+
+
+def parse_entries(text):
+    entries = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        stamp = to_int(entry.get("__REALTIME_TIMESTAMP"))
+        entries.append({
+            "cursor": entry.get("__CURSOR"),
+            "at_ms": int(stamp / 1000) if stamp else None,
+            "message": decode_message(entry.get("MESSAGE")),
+            "priority": to_int(entry.get("PRIORITY")),
+            "cmdline": entry.get("_CMDLINE") or "",
+        })
+    return entries
+
+
+JOURNAL_BASE = ["journalctl", "--user", "-o", "json", "--no-pager", "-q"]
+
+
+def fetch_journal(unit, cursor):
+    """-> (entries, reset, error). `reset` means the cursor was abandoned."""
+    if cursor:
+        out, error = run_command(JOURNAL_BASE + ["-u", unit, "--after-cursor", cursor])
+        if out is not None:
+            return parse_entries(out), False, None
+        # A vacuumed or otherwise unseekable cursor is not an outage; drop it
+        # and rebuild from the tail.
+        out, retry_error = run_command(
+            JOURNAL_BASE + ["-u", unit, "-n", str(CATCHUP_LINES)])
+        if out is None:
+            return [], False, retry_error or error
+        return parse_entries(out), True, None
+
+    out, error = run_command(JOURNAL_BASE + ["-u", unit, "-n", str(CATCHUP_LINES)])
+    if out is None:
+        return [], False, error
+    return parse_entries(out), True, None
+
+
+def journal_head(unit):
+    out, _ = run_command(JOURNAL_BASE + ["-u", unit, "-n", "1"])
+    entries = parse_entries(out) if out is not None else []
+    return entries[-1] if entries else None
+
+
+def probe_health(url, timeout=0.5):
+    """Any HTTP answer counts as alive -- 404 and 401 included.
+
+    The 5 s throughput line is suppressed on idle intervals, so log cadence
+    cannot answer 'is it up'; /health can, in 0.25 ms idle and under 3 ms
+    mid-prefill. Only a refused connection or a timeout means down.
+    """
+    # Imported here, not at module scope: urllib pulls in http.client, ssl
+    # and hashlib for 12.8 ms, and this collector is respawned every second.
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return {"healthy": True, "status": response.status, "error": None}
+    except urllib.error.HTTPError as error:
+        return {"healthy": True, "status": error.code, "error": None}
+    except Exception as error:  # URLError, socket.timeout, ssl, ...
+        return {"healthy": False, "status": None, "error": str(error)}
+
+
+def probe_gpu_processes(index, pid):
+    """Attribute VRAM to the server's own PID when the driver will say so.
+
+    Without this the GPU card would report the compositor's memory as the
+    model's. When nvidia-smi lists no compute apps (or the unit is down) the
+    popup falls back to labelling the figure `whole GPU`.
+    """
+    out, error = run_command(
+        ["nvidia-smi", "--query-compute-apps=pid,used_memory",
+         "--format=csv,noheader,nounits", "-i", str(index)], timeout=4.0)
+    if out is None:
+        return {"error": error}
+    mine = None
+    for line in out.strip().splitlines():
+        fields = [part.strip() for part in line.split(",")]
+        if len(fields) < 2 or not pid or to_int(fields[0]) != pid:
+            continue
+        used = to_int(fields[1])
+        if used is not None:
+            mine = (mine or 0) + used
+    return {"process_mem_mib": mine, "error": None}
+
+
+def probe_gpu(index):
+    out, error = run_command(
+        ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total,"
+         "temperature.gpu,power.draw,name",
+         "--format=csv,noheader,nounits", "-i", str(index)], timeout=4.0)
+    if out is None:
+        return {"error": error}
+    fields = [part.strip() for part in out.strip().splitlines()[0].split(",")]
+    if len(fields) < 6:
+        return {"error": "unexpected nvidia-smi output: %r" % out.strip()}
+    return {
+        "util_pct": to_int(fields[0]),
+        "mem_mib": to_int(fields[1]),
+        "mem_total_mib": to_int(fields[2]),
+        "temp_c": to_float(fields[3]),
+        "watts": to_float(fields[4]),
+        "name": fields[5] or None,
+        "error": None,
+    }
+
+
+# ----------------------------------------------------------- state building
+
+def blank_cursor():
+    """cursor.json: everything carried between runs, and nothing else.
+
+    stats.json is pure output -- derived here, written, never read back.
+    One carrier means one place to look when a number survives too long.
+    """
+    return {
+        "cursor": None,
+        "invocation_id": None,
+        "port": DEFAULT_PORT,
+        "model": None,
+        "boot": None,          # the serve line, parsed (schema 6)
+        "buckets": {},          # 5 s bucket index -> decode tokens
+        "pending": {},          # req# -> started at ms, awaiting a terminal
+        "counters": {"failed": 0, "rejected": 0, "client_disconnects": 0},
+        "max_req_id": 0,
+        "accept_pcts": [],      # spec-accept % of the last few requests
+        "task": None,           # open task: the fold of the current run
+        "settling_since_ms": None,  # the first tick the verdict read settled while the run was open (the arm); exists only alongside an open task
+        "last_task": None,      # its summary, once the run went quiet
+        "runs": [],             # closed runs, newest first (the previous-runs table)
+        "temp_samples": [],     # [at_ms, temp_c] ring for the per-run temp fold
+        "gpu": {},              # newest nvidia-smi reading + its history
+        "unit": {},             # newest systemctl reading
+        "healthy": False,
+        "last_entry_at_ms": None,
+        "last_journal_ok_ms": None,
+        "last_head_probe_ms": 0,
+        "last_unit_at_ms": 0,
+        "last_health_at_ms": 0,
+        "last_gpu_at_ms": 0,
+        "last_gpu_apps_at_ms": 0,
+        "last_sample": None,    # newest throughput line, parsed
+        "last_sample_at_ms": None,
+        "last_activity_at_ms": None,
+        "unseen": [],
+    }
+
+
+def blank_stats():
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "server": {}, "gpu": {}, "requests": {}, "config": None,
+        "runs": [],
+        "history": {}, "debug": {},
+    }
+
+
+def trim_map(mapping, cap):
+    """Keep the `cap` highest-keyed entries; bookkeeping must not grow."""
+    if len(mapping) <= cap:
+        return mapping
+    keys = sorted(mapping, key=lambda key: int(key))[-cap:]
+    return {key: mapping[key] for key in keys}
+
+
+# -------------------------------------------------------------- task fold
+#
+# A task is one run: from the moment the server stops being idle to the
+# moment the verdict has stayed settled. Lines never split or close runs by
+# themselves -- back-to-back requests with sub-grace gaps are one run; a
+# run ends when the verdict has stayed settled, a sustained idle
+# (RUN_SETTLE_MS) or an immediate starting/stopping/down, and its end is
+# the first settled tick. The summary is what the popup's previous-runs
+# table reads. Per-request numbers use the lines' own timestamps; the
+# run's span uses the ticks that bounded it.
+
+def blank_task(event, at_ms):
+    return {
+        "first_req": event["id"],
+        "last_req": event["id"],
+        "started_at_ms": at_ms,
+        "last_event_at_ms": at_ms,
+        "last_done_at_ms": None,
+        "requests": 0,
+        "output_tokens": 0,
+        "prompt_tokens": None,      # final context size, from the last done
+        "cache_pct": None,
+        "decode_time_ms": 0.0,      # sum of output/rate per request
+        "peak_decode_tok_s": None,  # fastest single request in the run
+        "profile": None,      # open token/bucket attribution, for the sparkline
+        "ttft_sum_ms": 0.0,
+        "ttft_n": 0,
+        "spec_accepted": 0,
+        "spec_drafts": 0,
+        # Per-run fold for the previous-runs table (schema 8; the wait
+        # avg's sum/count pair lands in schema 12).
+        "queue_wait_ms_max": 0.0,   # slowest request's time in the FIFO
+        "queue_wait_ms_sum": 0.0,   # ... of the requests that crossed QUEUE_WAIT_FLOOR_MS
+        "queue_wait_n": 0,
+        "accept_pct_sum": 0.0,      # per-request accept %: sum, count, max
+        "accept_pct_n": 0,
+        "accept_pct_max": 0.0,
+        "endpoint": event.get("endpoint"),
+        "outcome": None,
+        "messages": event.get("messages"),
+        "thinking": event.get("thinking"),
+        "tools": event.get("tools"),
+    }
+
+
+def summarize_task(task, temps=None):
+    # The run's end is the tick the server settled (set at close); for a
+    # still-open run that is unset, so the last done line is the fallback
+    # (and the duration is None anyway while open).
+    completed = task.get("completed_at_ms") or task.get("last_done_at_ms")
+    started = task.get("started_at_ms")
+    decode_time_ms = task.get("decode_time_ms") or 0.0
+    output = int(task.get("output_tokens") or 0)
+    # Effective rate: total accepted output over total decode time. A plain
+    # average of per-request rates would weight a 97-token request the same
+    # as a 786-token one.
+    rate = output / (decode_time_ms / 1000.0) if decode_time_ms else None
+    # .get, not subscript: an open task carried over in cursor.json by an
+    # older build has no peak key at all.
+    peak = task.get("peak_decode_tok_s")
+    # The profile is None until the first rate-bearing done, absent on a task
+    # dict that predates the field, and summarised as null when it never got
+    # tokens. The QML guards null and undefined alike.
+    prof = task.get("profile")
+    profile = None
+    if prof and any(t > 0 for t in prof["tokens"]):
+        # Copy before coarsening: summarise runs every tick on the open
+        # task, and the fold must keep its unmerged buckets for the close.
+        prof = {"width_ms": prof["width_ms"],
+                "tokens": list(prof["tokens"]),
+                "busy_ms": list(prof["busy_ms"])}
+        _coarsen_profile(prof, TASK_PROFILE_MAX)
+        profile = {"width_ms": prof["width_ms"],
+                   "tok_s": [round(t / (b / 1000.0), 1) if b > 0 else 0
+                             for t, b in zip(prof["tokens"], prof["busy_ms"])]}
+    ttft = (task["ttft_sum_ms"] / task["ttft_n"]) if task.get("ttft_n") else None
+    drafts = int(task.get("spec_drafts") or 0)
+    accept = (task["spec_accepted"] * 100.0 / drafts) if drafts else None
+    # The run's sampled peak: the busiest 5 s the profile recorded, not the
+    # fastest single request -- the table says what the run's decode looked
+    # like, and both its Avg and Max come from the same sampling.
+    tok_s_max = None
+    if profile:
+        prof_peak = max((value for value in profile["tok_s"] if value > 0), default=0.0)
+        tok_s_max = round(prof_peak, 1) if prof_peak > 0 else None
+    # The run's thermal behaviour: only the card samples inside its own span.
+    temp_avg = temp_max = None
+    if temps and started and completed:
+        within = [value for at, value in temps
+                  if started <= at <= completed and value is not None]
+        if within:
+            temp_avg = round(sum(within) / len(within), 1)
+            temp_max = round(max(within), 1)
+    n = int(task.get("accept_pct_n") or 0)
+    # The wait avg: the mean of the requests that crossed the noise floor.
+    # An open task predating the field has neither key, and a run with no
+    # floored wait never creates them -- read with or-defaults, or the
+    # summary would KeyError and wedge the collector until restart.
+    wait_n = int(task.get("queue_wait_n") or 0)
+    wait_avg = (round((task.get("queue_wait_ms_sum") or 0.0) / wait_n, 1)
+                if wait_n else None)
+    return {
+        "first_req": task.get("first_req"),
+        "last_req": task.get("last_req"),
+        "requests": int(task.get("requests") or 0),
+        "started_at_ms": started,
+        "completed_at_ms": completed,
+    # An open run has no duration: it is still happening, and the Telemetry
+    # tab's live tiles measure it from the snapshot's own clock instead.
+        "duration_ms": (completed - started) if completed else None,
+        "output_tokens": output,
+        "prompt_tokens": task.get("prompt_tokens"),
+        "cache_pct": task.get("cache_pct"),
+        "decode_tok_s": round(rate, 1) if rate else None,
+        "peak_decode_tok_s": round(peak, 1) if peak else None,
+        "tok_s_max": tok_s_max,
+        "accept_pct_avg": round(task["accept_pct_sum"] / n, 1) if n else None,
+        "accept_pct_max": round(task.get("accept_pct_max") or 0.0, 1) if n else None,
+        "queue_wait_ms_avg": wait_avg,
+        "queue_wait_ms_max": round(task.get("queue_wait_ms_max") or 0.0, 1),
+        "temp_avg_c": temp_avg,
+        "temp_max_c": temp_max,
+        "profile": profile,
+        "ttft_ms": round(ttft, 1) if ttft is not None else None,
+        "accept_pct": round(accept, 1) if accept is not None else None,
+        "endpoint": task.get("endpoint"),
+        "outcome": task.get("outcome"),
+        "messages": task.get("messages"),
+        "thinking": task.get("thinking"),
+        "tools": task.get("tools"),
+    }
+
+
+def _profile_ensure(profile, until_ms, origin_ms):
+    """Grow the open profile to cover `until_ms`; buckets are relative to the
+    task's `started_at_ms`."""
+    width = profile["width_ms"]
+    need = int((until_ms - origin_ms) // width) + 1
+    have = len(profile["tokens"])
+    if need > have:
+        profile["tokens"].extend([0.0] * (need - have))
+        profile["busy_ms"].extend([0.0] * (need - have))
+
+
+def _coarsen_profile(profile, limit):
+    """Merge pairs in place until the profile holds at most `limit` buckets.
+    Tokens and busy time both sum, so a merged bucket keeps its rate honest."""
+    while len(profile["tokens"]) > limit:
+        tokens, busy, width = profile["tokens"], profile["busy_ms"], profile["width_ms"]
+        profile["tokens"] = [tokens[i] + (tokens[i + 1] if i + 1 < len(tokens) else 0.0)
+                             for i in range(0, len(tokens), 2)]
+        profile["busy_ms"] = [busy[i] + (busy[i + 1] if i + 1 < len(busy) else 0.0)
+                              for i in range(0, len(busy), 2)]
+        profile["width_ms"] = width * 2
+
+
+def fold_profile(task, end_ms, output, rate):
+    """Attribute one request's tokens and decode seconds to the task profile.
+
+    The request's decode interval is known from its done line: it ended at
+    `end_ms` and ran `output / rate` seconds before that. Each overlapped
+    bucket takes its fraction of the tokens and its overlap of decode time, so
+    a bucket's rate is tokens / busy time -- the same normalisation as the
+    effective-rate row, with wall-clock gaps keeping zero decode time and
+    reading zero. Token fractions divide by the TRUE span, so an interval
+    clipped at the task start (a task opened by a done, or a stale line
+    folding into a later task) loses its head's tokens along with its time
+    and every bucket the interval touches still reads the request's own
+    rate -- never more. Negative bucket indices (which would corrupt the
+    array) are impossible: the start clamps to the task start.
+    """
+    profile = task.get("profile")
+    if profile is None:
+        profile = {"width_ms": BUCKET_MS, "tokens": [0.0], "busy_ms": [0.0]}
+        task["profile"] = profile
+    origin = int(task["started_at_ms"])
+    decode_ms = int(output / rate * 1000.0)   # the request's true decode span
+    start = max(end_ms - decode_ms, origin)
+    if end_ms - start > PROFILE_MAX_SPAN_MS:
+        start = end_ms - PROFILE_MAX_SPAN_MS
+    _profile_ensure(profile, end_ms, origin)
+    width = profile["width_ms"]
+    tokens, busy = profile["tokens"], profile["busy_ms"]
+    for i in range(int((start - origin) // width), int((end_ms - 1 - origin) // width) + 1):
+        overlap = min(end_ms, origin + (i + 1) * width) - max(start, origin + i * width)
+        if overlap > 0:   # overlap > 0 implies decode_ms > 0
+            tokens[i] += output * overlap / decode_ms
+            busy[i] += overlap
+    _coarsen_profile(profile, PROFILE_TRIGGER)
+
+
+def roll_task(event, at_ms, cursor_state):
+    """A started line: folds into the open run, or opens one when the run
+    was never observed busy (a short request between two verdict ticks)."""
+    task = cursor_state.get("task")
+    if task is None:
+        task = blank_task(event, at_ms)
+        cursor_state["task"] = task
+        return task
+    task["last_req"] = event["id"]
+    task["last_event_at_ms"] = at_ms
+    for field in ("messages", "thinking", "tools", "endpoint"):
+        if event.get(field) is not None:
+            task[field] = event[field]
+    return task
+
+
+def fold_done(event, at_ms, cursor_state):
+    task = cursor_state.get("task")
+    if task is None:
+        # No started line (cursor rebuilt): the done is what the task is.
+        task = blank_task(event, at_ms)
+        cursor_state["task"] = task
+    task["last_req"] = event["id"]
+    task["last_event_at_ms"] = at_ms
+    task["last_done_at_ms"] = at_ms
+    task["requests"] += 1
+    if event["output_tokens"]:
+        task["output_tokens"] += int(event["output_tokens"])
+    if event["prompt_tokens"] is not None:
+        task["prompt_tokens"] = int(event["prompt_tokens"])
+    if event["cache_pct"] is not None:
+        task["cache_pct"] = float(event["cache_pct"])
+    rate = event["decode_tok_s"]
+    if rate and event["output_tokens"]:
+        task["decode_time_ms"] += int(event["output_tokens"]) / rate * 1000.0
+        # Same gate as the average, so both rows are drawn from the same set
+        # of requests. .get for a task that predates the field in cursor.json.
+        task["peak_decode_tok_s"] = max(task.get("peak_decode_tok_s") or 0, rate)
+        fold_profile(task, at_ms, int(event["output_tokens"]), rate)
+    if event["ttft_ms"] is not None:
+        task["ttft_sum_ms"] += float(event["ttft_ms"])
+        task["ttft_n"] += 1
+    if event["spec_accepted"] is not None:
+        task["spec_accepted"] += int(event["spec_accepted"])
+        task["spec_drafts"] += int(event["spec_drafts"])
+    if event.get("endpoint"):
+        task["endpoint"] = event["endpoint"]
+    if event.get("outcome"):
+        task["outcome"] = event["outcome"]
+    if event.get("queue_ms"):
+        # The done line's `queue` figure is the request's time in the FIFO
+        # before the engine took it. 12-27 ms is the scheduler's own
+        # noise floor when nothing waits; the UI draws a dash for anything
+        # under it (QUEUE_WAIT_MIN_MS in format.js -- the same 100 ms as
+        # QUEUE_WAIT_FLOOR_MS here), a number when a request genuinely
+        # queued. The max counts every wait; the avg counts only the ones
+        # that crossed the floor, so it reads "mean of the requests that
+        # really waited", never the noise floor.
+        queue_ms = float(event["queue_ms"])
+        task["queue_wait_ms_max"] = max(float(task.get("queue_wait_ms_max") or 0.0),
+                                       queue_ms)
+        if queue_ms >= QUEUE_WAIT_FLOOR_MS:
+            task["queue_wait_ms_sum"] = float(task.get("queue_wait_ms_sum") or 0.0) + queue_ms
+            task["queue_wait_n"] = int(task.get("queue_wait_n") or 0) + 1
+    pct = event.get("spec_pct")
+    if pct is not None:
+        task["accept_pct_sum"] += float(pct)
+        task["accept_pct_n"] = int(task.get("accept_pct_n") or 0) + 1
+        task["accept_pct_max"] = max(float(task.get("accept_pct_max") or 0.0),
+                                     float(pct))
+
+
+def project_run(summary):
+    """A closed run -> its previous-runs row: the table's own columns.
+
+    The full summary stays in last_task and in the cursor; the ring keeps
+    only what the Telemetry tab's table can print, so stats.json keeps its size
+    budget (FileView parses it twice a second per monitor).
+    """
+    return {
+        "completed_at_ms": summary.get("completed_at_ms"),
+        "duration_ms": summary.get("duration_ms"),
+        "tok_s_avg": summary.get("decode_tok_s"),
+        "tok_s_max": summary.get("tok_s_max"),
+        "accept_pct_avg": summary.get("accept_pct_avg"),
+        "accept_pct_max": summary.get("accept_pct_max"),
+        "temp_avg_c": summary.get("temp_avg_c"),
+        "temp_max_c": summary.get("temp_max_c"),
+        "queue_wait_ms_avg": summary.get("queue_wait_ms_avg"),
+        "queue_wait_ms_max": summary.get("queue_wait_ms_max"),
+    }
+
+
+def close_run(cursor_state, task, at_ms):
+    """Close the open run at `at_ms` (the tick the server settled): the
+    final summary to last_task and, if the run carried a done line, the
+    ring. A done-less run -- a failed burst -- lands in last_task only;
+    the ring keeps five real runs, newest first."""
+    task["completed_at_ms"] = at_ms
+    summary = summarize_task(task, temps=cursor_state.get("temp_samples"))
+    cursor_state["last_task"] = summary
+    cursor_state["task"] = None
+    # The arm dies with the task: a stale one would predate the next task's start and close it at a negative duration.
+    cursor_state["settling_since_ms"] = None
+    if task.get("last_done_at_ms"):
+        runs = list(cursor_state.get("runs") or [])
+        runs.insert(0, project_run(summary))
+        cursor_state["runs"] = runs[:RUNS_KEEP]
+    return summary
+
+
+def close_run_if_settled(cursor_state, state, now, settle_ms=None):
+    """The run ends at the first tick the verdict settled, and that end is
+    armed (idle) or immediate (starting/stopping/down): the settle grace
+    waits for the verdict to STAY settled before closing, so a burst that
+    settles and re-bursts inside the grace is one run, while work cannot
+    continue across a restart. 0 grace = same-tick close. Returns the
+    summary it closed, or None."""
+    # Resolved at call time, not as a default-argument value: the None
+    # default means "use RUN_SETTLE_MS", and the flag (and the tests) pass
+    # the value explicitly.
+    settle_ms = RUN_SETTLE_MS if settle_ms is None else max(0, int(settle_ms))
+    task = cursor_state.get("task")
+    if task is None:
+        # No open task: clear a stray arm (it exists only alongside one).
+        cursor_state["settling_since_ms"] = None
+        return None
+    if state in ("busy", "queued"):
+        # Activity: the settle clock does not start or survive it.
+        cursor_state["settling_since_ms"] = None
+        return None
+    if state in ("starting", "stopping", "down"):
+        # Work cannot continue across a restart: close immediately, at the
+        # arm if the run was already settled -- its end stays the settle
+        # tick, so a restart 40 s into the grace does not inflate
+        # duration_ms or fold cool-down GPU samples into the temp window.
+        return close_run(cursor_state, task,
+                         cursor_state.get("settling_since_ms") or now)
+    arm = cursor_state.get("settling_since_ms")
+    if arm is None:
+        arm = cursor_state["settling_since_ms"] = now
+    if now - arm >= settle_ms:
+        # The run ENDS at the arm tick (the first settled tick), not the
+        # close tick, so duration, the temp fold window and the table's
+        # When label end where the work did, not where the grace expired.
+        return close_run(cursor_state, task, arm)
+    return None
+
+
+def fold_memory(cursor_state, event):
+    """The engine's boot-time memory readings, latest wins (schema 11).
+
+    The Settings tab's budget rows: what the boot parameters committed,
+    in the engine's own words. A restart reissues the lines and the new
+    readings win; a purged journal reads as dashes until they are seen
+    again, like the boot line itself.
+    """
+    mem = cursor_state.setdefault("mem", {})
+    if event["kind"] == "weights_ready":
+        mem["weights_gib"] = event["gib"]
+    elif event["kind"] == "engine_ready":
+        mem["weights_gib"] = event["weights_gib"]
+    elif event["kind"] == "capacity":
+        mem["kv_gib"] = event["runtime_gib"]
+    else:
+        mem["host_%s_gib" % event["what"]] = event["gib"]
+
+
+def apply_entries(entries, cursor_state, reset):
+    """Fold journal entries into the cursor bookkeeping.
+
+    Requests are counted for the tallies and folded into the task; the
+    tallies, the spec-accept window and the last closed task are all that
+    outlives a line.
+    """
+    if reset:
+        # The req# counter is per-invocation and restarts with the process,
+        # so a rebuilt window starts its tallies from scratch too.
+        cursor_state["counters"] = {"failed": 0, "rejected": 0, "client_disconnects": 0}
+        cursor_state["max_req_id"] = 0
+        cursor_state["pending"] = {}
+        cursor_state["accept_pcts"] = []
+        # A task that spans a restart straddles two req# numberings: gone.
+        # So is the previous-runs table -- five rows from two invocations
+        # would read as one long evening.
+        cursor_state["task"] = None
+        # The arm is gone with the task: it exists only alongside one.
+        cursor_state["settling_since_ms"] = None
+        cursor_state["last_task"] = None
+        cursor_state["runs"] = []
+
+    counters = cursor_state["counters"]
+    pending = cursor_state["pending"]
+    buckets = cursor_state["buckets"]
+    accepts = list(cursor_state.get("accept_pcts") or [])
+    unseen = list(cursor_state.get("unseen") or [])
+    max_id = int(cursor_state.get("max_req_id") or 0)
+
+    for entry in entries:
+        if entry.get("cursor"):
+            cursor_state["cursor"] = entry["cursor"]
+        if entry.get("at_ms"):
+            cursor_state["last_entry_at_ms"] = entry["at_ms"]
+        if entry.get("cmdline"):
+            boot = parse_boot(entry["cmdline"])
+            if boot:
+                cursor_state["boot"] = boot
+            match = MODEL_CMDLINE_RE.search(entry["cmdline"])
+            if match:
+                cursor_state["model"] = match.group(1)
+            match = PORT_CMDLINE_RE.search(entry["cmdline"])
+            if match:
+                cursor_state["port"] = int(match.group(1))
+
+        event = parse_message(entry["message"])
+        if not event:
+            continue
+        at_ms = entry["at_ms"] or now_ms()
+        kind = event["kind"]
+
+        if kind == "engine_ready":
+            # One line per boot; the latest wins. The artifact path only
+            # hints at the weight profile, and not always -- this is the
+            # engine saying who it is.
+            cursor_state["engine_identity"] = {"model": event["model"],
+                                               "profile": event["profile"]}
+            if event.get("weights_gib") is not None:
+                fold_memory(cursor_state, event)
+
+        if kind in ("weights_ready", "capacity", "host_pinned"):
+            fold_memory(cursor_state, event)
+
+        if kind in ("started", "done", "terminal"):
+            key = str(event["id"])
+            max_id = max(max_id, event["id"])
+            cursor_state["last_activity_at_ms"] = at_ms
+            if kind == "started":
+                pending[key] = at_ms
+                roll_task(event, at_ms, cursor_state)
+            elif kind == "done":
+                fold_done(event, at_ms, cursor_state)
+            else:
+                # A terminal line is task activity too: a failed burst that
+                # ends without a done line still closes on the quiet, not
+                # before the failure.
+                task = cursor_state.get("task")
+                if task:
+                    task["last_event_at_ms"] = at_ms
+            if kind != "started":
+                pending.pop(key, None)
+
+        if kind == "done":
+            if event["spec_pct"] is not None:
+                accepts.append(event["spec_pct"])
+                del accepts[:-ACCEPT_ALARM_N]
+
+        elif kind == "terminal":
+            # One req# can emit several terminal lines (a `done | cancelled`
+            # then a transport failure); each is classified on its own.
+            bucket = classify_http(event["http"])
+            if bucket:
+                counters[bucket] += 1
+
+        elif kind == "throughput":
+            tokens = event["decode_tokens"]
+            if tokens:
+                index = str(at_ms // BUCKET_MS)
+                buckets[index] = int(buckets.get(index, 0)) + tokens
+            cursor_state["last_sample"] = event
+            cursor_state["last_sample_at_ms"] = at_ms
+            if (event.get("running") or 0) > 0 or (event.get("waiting") or 0) > 0:
+                cursor_state["last_activity_at_ms"] = at_ms
+
+        elif kind == "unseen":
+            label = event["verb"]
+            if label and label not in unseen:
+                unseen.append(label)
+                del unseen[:-8]
+
+    cursor_state["pending"] = trim_map(pending, PENDING_CAP)
+    cursor_state["buckets"] = trim_map(buckets, BUCKET_KEEP)
+    cursor_state["accept_pcts"] = accepts
+    cursor_state["unseen"] = unseen
+    cursor_state["max_req_id"] = max_id
+
+
+def render_history(buckets, now):
+    """12 wall-clock buckets, oldest first. No sample in a bucket means 0.
+
+    Rates are derived from token *counts* over wall time, not from the
+    throughput line's own tok/s -- that number averages over the whole 5 s
+    interval including idle gaps, so it reads ~118 where per-request decode
+    reads ~193. Counting tokens makes idle gaps true zeroes.
+    """
+    current = now // BUCKET_MS
+    tokens = []
+    for offset in range(HISTORY_BUCKETS - 1, -1, -1):
+        tokens.append(int(buckets.get(str(current - offset), 0)))
+    return {
+        "window_sec": int(HISTORY_BUCKETS * BUCKET_MS / 1000),
+        "decode_tok_s": [round(count / (BUCKET_MS / 1000.0), 1) for count in tokens],
+    }
+
+
+def window_decode_rate(buckets, now):
+    current = now // BUCKET_MS
+    span = int(DECODE_WINDOW_MS / BUCKET_MS)
+    total = 0
+    for offset in range(span):
+        total += int(buckets.get(str(current - offset), 0))
+    return round(total / (DECODE_WINDOW_MS / 1000.0), 1)
+
+
+def derive_state(active_state, healthy, active_requests, queued_requests):
+    """down > starting > queued > busy > idle, exactly as documented.
+
+    `down` needs both the unit gone and health failing: a hung server still
+    reads as active, and a stopped unit whose port answers is not our
+    verdict to make. `starting` covers the whole boot window, which is why
+    a restart does not flash down.
+    """
+    if active_state in ("inactive", "failed") and not healthy:
+        return "down"
+    if active_state == "activating":
+        return "starting"
+    if active_state == "deactivating":
+        return "stopping"
+    if queued_requests > 0:
+        return "queued"
+    if active_requests > 0:
+        return "busy"
+    return "idle"
+
+
+def accept_alarm(pcts):
+    """True when the last N requests to report spec-accept were all low."""
+    tail = list(pcts or [])[-ACCEPT_ALARM_N:]
+    if len(tail) < ACCEPT_ALARM_N:
+        return False
+    return all(value < ACCEPT_ALARM_PCT for value in tail)
+
+
+# --------------------------------------------------------------------- io
+
+def read_json(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value if isinstance(value, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def write_json_atomic(path, payload):
+    """mktemp beside the target + os.replace: readers see whole files only.
+
+    Main.qml watches this path with FileView; a partial write would parse as
+    a broken snapshot and blank the widget.
+    """
+    import tempfile   # 3.4 ms of import, for two calls a second
+
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    handle, temp_path = tempfile.mkstemp(dir=directory, prefix=".stats-", suffix=".tmp")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, separators=(",", ":"))
+            stream.write("\n")
+        os.replace(temp_path, path)
+    except BaseException:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+
+
+PREFIX_TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.(\d+)")
+
+
+def timestamp_from_prefix(message):
+    """Fixture replay has no journal metadata; the app's own prefix will do.
+
+    The wall-clock time is read as UTC: the live path never parses this
+    shape (journalctl -o json carries absolute epoch microseconds), so
+    the replay only needs a convention, and a fixed one keeps the frozen
+    golden deterministic across timezones.
+    """
+    match = PREFIX_TIME_RE.match(message)
+    if not match:
+        return None
+    try:
+        parsed = time.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    fraction = match.group(2)[:3].ljust(3, "0")
+    return int(calendar.timegm(parsed) * 1000) + int(fraction)
+
+
+def entries_from_text(text):
+    """Accept `-o json` entries or bare MESSAGE lines (`-o cat`, fixtures)."""
+    entries = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("{"):
+            entries.extend(parse_entries(stripped))
+            continue
+        entries.append({
+            "cursor": None,
+            "at_ms": timestamp_from_prefix(stripped),
+            "message": stripped,
+            "priority": None,
+            "cmdline": "",
+        })
+    return entries
+
+
+# ------------------------------------------------------------------- main
+
+def hold_lock(state_dir):
+    """Exclusive, or None if another collector already holds it.
+
+    The bar instantiates one widget per monitor, so on a two-screen desktop
+    two timers spawn two collectors a second against one cursor -- and the
+    journal read is consuming, so they would each see half the lines. flock
+    is released by the kernel on exit, so a killed run leaves nothing stale.
+    """
+    import fcntl
+
+    os.makedirs(state_dir, exist_ok=True)
+    handle = os.open(os.path.join(state_dir, "collector.lock"),
+                     os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(handle)
+        return None
+    return handle
+
+
+def migrate_cursor(cursor_state):
+    """Compatibility for cursors written by pre-1.0 builds.
+
+    An in-flight task carrying pre-1.0 field names would KeyError the new
+    fold, so the half-open run is dropped; the journal position, the health
+    and GPU folds and the unit reading survive. Ring rows projected before
+    the queue-wait split carry the old queue_wait_ms key; rename it in place
+    so the five old runs keep their Max instead of dangling as dashes until
+    they rotate out. A fresh cursor or a replay already has the new shapes:
+    a no-op.
+    """
+    for run in cursor_state.get("runs") or []:
+        if isinstance(run, dict) and "queue_wait_ms" in run \
+                and "queue_wait_ms_max" not in run:
+            run["queue_wait_ms_max"] = run.pop("queue_wait_ms")
+    task = cursor_state.get("task")
+    if isinstance(task, dict) and "accept_pct_sum" not in task:
+        cursor_state["task"] = None
+        # The arm is gone with the task: it exists only alongside one.
+        cursor_state["settling_since_ms"] = None
+        cursor_state["last_task"] = None
+        cursor_state["runs"] = []
+        cursor_state["buckets"] = {}
+        cursor_state["pending"] = {}
+        cursor_state["counters"] = {"failed": 0, "rejected": 0, "client_disconnects": 0}
+        cursor_state["accept_pcts"] = []
+    return cursor_state
+
+
+def collect(args, now):
+    state_dir = args.state_dir
+    cursor_path = os.path.join(state_dir, "cursor.json")
+    stats_path = os.path.join(state_dir, "stats.json")
+
+    cursor_state = blank_cursor()
+    stats = blank_stats()
+    if not args.stdin:
+        # A replay starts from nothing. Folding the carried-over cursor into
+        # it would make the same input produce different output depending on
+        # what the collector had already seen.
+        cursor_state.update(read_json(cursor_path) or {})
+        cursor_state = migrate_cursor(cursor_state)
+
+    # A replay has no live unit behind it -- probing the real one would make
+    # the replay's output depend on whatever server happens to be running.
+    # Live, the probe is a fork+exec plus a D-Bus round trip for properties
+    # that only move when the unit starts, stops or fails, so it runs on the
+    # same 2 s cadence as /health -- and `down` needs both of them anyway.
+    unit = dict(cursor_state.get("unit") or NO_UNIT)
+    if not args.stdin and now - int(cursor_state.get("last_unit_at_ms") or 0) >= UNIT_EVERY_MS:
+        unit = probe_unit(args.unit)
+        cursor_state["unit"] = unit
+        cursor_state["last_unit_at_ms"] = now
+    reset = False
+    if unit["invocation_id"] and unit["invocation_id"] != cursor_state.get("invocation_id"):
+        # New process: req# restarts at 1, so carrying the old window over
+        # would double-count and invent gaps.
+        reset = True
+        cursor_state["cursor"] = None
+        cursor_state["invocation_id"] = unit["invocation_id"]
+        cursor_state["buckets"] = {}
+        cursor_state["last_sample"] = None
+        cursor_state["last_sample_at_ms"] = None
+
+    journal_error = None
+    if args.stdin:
+        entries = entries_from_text(sys.stdin.read())
+        reset = True
+    else:
+        entries, cursor_reset, journal_error = fetch_journal(args.unit, cursor_state.get("cursor"))
+        reset = reset or cursor_reset
+        if journal_error is None:
+            cursor_state["last_journal_ok_ms"] = now
+            if not entries and cursor_state.get("cursor"):
+                # Quiet unit, or a cursor the journal can no longer reach.
+                # Only pay for the head probe after a minute of silence.
+                last_entry = cursor_state.get("last_entry_at_ms") or 0
+                last_probe = cursor_state.get("last_head_probe_ms") or 0
+                if now - last_entry > RESET_PROBE_MS and now - last_probe > RESET_PROBE_MS:
+                    cursor_state["last_head_probe_ms"] = now
+                    head = journal_head(args.unit)
+                    if head and head.get("cursor") != cursor_state.get("cursor") \
+                            and (head.get("at_ms") or 0) > last_entry:
+                        entries, reset, journal_error = fetch_journal(args.unit, None)
+
+    apply_entries(entries, cursor_state, reset)
+    counters_out = cursor_state["counters"]
+
+    health = None
+    if not args.stdin and now - int(cursor_state.get("last_health_at_ms") or 0) >= HEALTH_EVERY_MS:
+        port = cursor_state.get("port") or DEFAULT_PORT
+        health = probe_health(args.health_url or "http://127.0.0.1:%d/health" % port)
+        cursor_state["last_health_at_ms"] = now
+        cursor_state["healthy"] = health["healthy"]
+
+    gpu_sample = None
+    if not args.stdin and args.show_gpu \
+            and now - int(cursor_state.get("last_gpu_at_ms") or 0) >= GPU_EVERY_MS:
+        gpu_sample = probe_gpu(args.gpu_index)
+        cursor_state["last_gpu_at_ms"] = now
+
+    gpu_processes = None
+    if gpu_sample is not None and not gpu_sample.get("error") \
+            and now - int(cursor_state.get("last_gpu_apps_at_ms") or 0) >= GPU_PROCESS_EVERY_MS:
+        gpu_processes = probe_gpu_processes(args.gpu_index, unit.get("pid"))
+        cursor_state["last_gpu_apps_at_ms"] = now
+
+    # ---- server section
+    healthy = bool(cursor_state.get("healthy"))
+
+    # One gate, not one per field: a sample this old describes nothing that is
+    # still happening, so every number read off it goes with it.
+    sample_at = cursor_state.get("last_sample_at_ms") or 0
+    fresh = (now - sample_at) <= ACTIVITY_FRESH_MS
+    sample = (cursor_state.get("last_sample") or {}) if fresh else {}
+    active_requests = int(sample.get("running") or 0)
+    queued_requests = int(sample.get("waiting") or 0)
+    # A started req# without its terminal is work in flight whether or not
+    # the gauge saw it: the gauge samples at its own cadence, so a request
+    # that started just after a sample is invisible to it until the next one,
+    # and prefill-bound requests log nothing else at all. A run must not
+    # settle while the journal still says work is open.
+    recent_started = [value for value in cursor_state["pending"].values()
+                      if now - int(value or 0) <= ACTIVITY_FRESH_MS]
+    active_requests = max(active_requests, len(recent_started))
+
+    state = derive_state(unit["active_state"], healthy, active_requests, queued_requests)
+
+    # The engine reports its own rate on every throughput line, and the lines
+    # cadence faster than the staleness gate: while the server is busy the
+    # fresh sample's number is the reading. The bucket window is the stand-in
+    # for the seconds a prefill-only interval keeps decode out of the sample --
+    # without the sample preference the bar reads the current in-progress
+    # bucket, which sits empty from the bucket boundary until the next line
+    # lands, so a steady run flickered rate -> "prefill" -> rate every cycle.
+    decode_rate = window_decode_rate(cursor_state["buckets"], now)
+    if state in ("busy", "queued") and sample.get("decode_tok_s"):
+        decode_rate = float(sample["decode_tok_s"])
+
+    stats["server"] = {
+        "state": state,
+        "healthy": healthy,
+        "active_state": unit["active_state"],
+        "invocation_id": cursor_state.get("invocation_id"),
+        "model": cursor_state.get("model"),
+        "port": cursor_state.get("port") or DEFAULT_PORT,
+        "boot": cursor_state.get("boot"),
+        "active_requests": active_requests,
+        "queued_requests": queued_requests,
+        "decode_tok_s": decode_rate,
+        "prefill_tok_s": sample.get("prefill_tok_s"),
+        "avg_batch": sample.get("batch"),
+        "host_pct": sample.get("host_pct"),
+        "host_work_ms": sample.get("host_work_ms"),
+        "last_activity_at_ms": cursor_state.get("last_activity_at_ms"),
+        "last_sample_at_ms": sample_at or None,
+        "stale": bool(journal_error is not None),
+    }
+
+    # The verdict just derived is this tick's word on whether the server
+    # has settled, and a verdict that has STAYED settled ends the open run,
+    # at the tick it first settled. Deriving the state first is what this
+    # placement buys -- the close decision rides on the same verdict the
+    # bar shows.
+    close_run_if_settled(cursor_state, stats["server"]["state"], now,
+                         args.settle_ms)
+
+    # ---- gpu section
+    gpu = dict(cursor_state.get("gpu") or {"stale": True, "history": []})
+    if gpu_processes is not None and not gpu_processes.get("error"):
+        gpu["process_mem_mib"] = gpu_processes.get("process_mem_mib")
+    if gpu_sample is not None:
+        if gpu_sample.get("error"):
+            gpu["stale"] = True
+        else:
+            history = list(gpu.get("history") or [])
+            history.append(gpu_sample["util_pct"])
+            gpu.update({
+                "util_pct": gpu_sample["util_pct"],
+                "mem_mib": gpu_sample["mem_mib"],
+                "mem_total_mib": gpu_sample["mem_total_mib"],
+                "temp_c": gpu_sample.get("temp_c"),
+                "watts": gpu_sample.get("watts"),
+                "name": gpu_sample.get("name"),
+                "history": history[-GPU_HISTORY:],
+                "stale": False,
+            })
+            if gpu_sample.get("temp_c") is not None:
+                # The per-run temp fold needs the run's own samples, and a
+                # task can outlive the 12-sample util history, so the
+                # temperatures keep a longer ring in the cursor.
+                samples = list(cursor_state.get("temp_samples") or [])
+                samples.append([now, gpu_sample["temp_c"]])
+                cursor_state["temp_samples"] = samples[-TEMP_SAMPLES_KEEP:]
+    cursor_state["gpu"] = gpu
+    stats["gpu"] = dict(gpu, index=args.gpu_index)
+
+    # ---- requests section
+    accepts = cursor_state.get("accept_pcts") or []
+    stats["requests"] = {
+        # `req#N` is the server's own per-invocation counter, so its high
+        # water mark is the count -- exact, and free.
+        "total_this_invocation": int(cursor_state.get("max_req_id") or 0),
+        "failed": counters_out["failed"],
+        "rejected": counters_out["rejected"],
+        "client_disconnects": counters_out["client_disconnects"],
+        "accept_pct": accepts[-1] if accepts else None,
+        "accept_alarm": accept_alarm(accepts),
+    }
+
+    # ---- config section (schema 11)
+    # The Settings tab: the boot parameters -- every field either a
+    # boot-cmdline flag (parsed by parse_boot) or the engine's own identity
+    # line -- and the memory budget they committed, the engine's own
+    # boot-time readings (weights, the device KV pool, the pinned host RAM).
+    # Read-only on purpose -- the knobs live in the server's launch command,
+    # not in the bar.
+    # Until the boot lines have been seen (a long-lived journal cursor), the
+    # model is the artifact's own name, the weight profile its trailing
+    # token, and the budget rows read dashes.
+    boot = cursor_state.get("boot") or {}
+    identity = cursor_state.get("engine_identity") or {}
+    mem = cursor_state.get("mem") or {}
+    model_hint = cursor_state.get("model")
+    profile_hint = WEIGHT_PROFILE_HINT_RE.search(model_hint or "")
+    host = boot.get("host") or "127.0.0.1"
+    port = cursor_state.get("port") or DEFAULT_PORT
+    stats["config"] = {
+        "model": identity.get("model") or model_hint,
+        "weight_profile": identity.get("profile")
+        or (profile_hint.group(1) if profile_hint else None),
+        "max_context_tokens": boot.get("max-context"),
+        "kv_dtype": boot.get("kv-dtype"),
+        "kv_capacity_tokens": boot.get("kv-capacity"),
+        "max_concurrency": boot.get("max-concurrency"),
+        "mtp_draft_tokens": boot.get("draft-tokens"),
+        "lm_head_draft": boot.get("lm-head-draft"),
+        "gpu": stats["gpu"].get("name"),
+        "endpoint": "%s:%s" % (host, port),
+        "weights_gib": mem.get("weights_gib"),
+        "kv_gib": mem.get("kv_gib"),
+        "host_kv_gib": mem.get("host_kv_gib"),
+        "host_state_gib": mem.get("host_state_gib"),
+    }
+
+    # ---- runs section (schema 10; queue-wait avg + max split in 12)
+    # One row per closed run, newest first: the ring's projected summaries
+    # plus the age label, which the QML would otherwise re-derive from the
+    # snapshot clock (the collector owns the clock, so it owns the label).
+    # The full per-run summaries (task, last_task) stay one cat away in the
+    # cursor -- nothing displayed ever read them out of the display file,
+    # and they were the file's heaviest sections (schema 9 -> 10).
+    stats["runs"] = [
+        dict(run, when_label=age_label(now - run["completed_at_ms"]))
+        for run in (cursor_state.get("runs") or [])
+        if run.get("completed_at_ms")
+    ]
+
+    stats["history"] = render_history(cursor_state["buckets"], now)
+    stats["generated_at_ms"] = now
+    stats["schema_version"] = SCHEMA_VERSION
+    stats["debug"] = {
+        "unseen_events": cursor_state.get("unseen") or [],
+        "journal_error": journal_error,
+        "health_error": (health or {}).get("error"),
+        "health_status": (health or {}).get("status"),
+        "gpu_error": (gpu_sample or {}).get("error") or (gpu_processes or {}).get("error"),
+        "unit_error": unit.get("error"),
+        "last_journal_ok_ms": cursor_state.get("last_journal_ok_ms"),
+        "collector_ms": now_ms() - _STARTED_MS,
+    }
+    return stats, cursor_state, stats_path, cursor_path
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Write NInfer server stats for the omarchy bar plugin.")
+    default_state = os.path.join(
+        os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+        "omarchy", "ninfer")
+    parser.add_argument("--state-dir", default=default_state)
+    parser.add_argument("--unit", default=DEFAULT_UNIT)
+    parser.add_argument("--gpu-index", type=int, default=0)
+    parser.add_argument("--health-url", default=None)
+    parser.add_argument("--no-gpu", dest="show_gpu", action="store_false")
+    parser.add_argument("--stdin", action="store_true",
+                        help="read journal lines from stdin instead of journalctl")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print the state file instead of writing it")
+    parser.add_argument("--now-ms", type=int, default=None,
+                        help="pin the clock (testing: makes a replay reproducible)")
+    parser.add_argument("--settle-ms", type=int, default=None,
+                        help="override for the settle grace in ms (0 = close on the first settled tick); negative values clamp to 0")
+    args = parser.parse_args(argv)
+    global _STARTED_MS
+    _STARTED_MS = now_ms()
+
+    # Another collector is mid-run: it will write the state this one would
+    # have. Not an error, and not worth a second opinion on the cursor.
+    lock = None
+    if not args.dry_run:
+        lock = hold_lock(args.state_dir)
+        if lock is None:
+            return 0
+    try:
+        stats, cursor_state, stats_path, cursor_path = collect(
+            args, args.now_ms if args.now_ms else _STARTED_MS)
+    except Exception as error:  # never look like a dead server
+        sys.stderr.write("omarchy-ninfer-stats-update: %s\n" % error)
+        return 0
+
+    if args.dry_run:
+        json.dump(stats, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+
+    write_json_atomic(stats_path, stats)
+    write_json_atomic(cursor_path, cursor_state)
+    os.close(lock)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
