@@ -67,7 +67,7 @@ Two tabs, ~380 px. **Telemetry** is the default; both tabs reset on open. `Tab` 
 ## Requirements
 
 - Linux with systemd (the plugin reads the **user** journal)
-- a NInfer server running as a systemd user unit, named `ninfer` by default — or any unit whose journal lines it can parse; see the collector's `--unit` flag
+- a NInfer server running as a systemd user unit, named `ninfer` by default — or any unit whose journal lines it can parse; see the collector's `--unit` flag. On Arch Linux the [`ninfer-git` AUR package](https://aur.archlinux.org/packages/ninfer-git/) builds the engine from the upstream repository — `omarchy pkg aur add ninfer-git` installs it, or pick it in the AUR install menu (`omarchy pkg aur install`).
 - `nvidia-smi` (an NVIDIA GPU)
 - `python3` (stdlib only)
 - [Omarchy](https://github.com/omacom/omarchy)
@@ -149,7 +149,7 @@ omarchy-shell michaeldewildt.ninfer-gauge probe
 
 - `content` is the height of the content being shown. A Column ignores invisible children, so it is exactly what is in front of the user. `scroll` reports whether it exceeds the flick — the no-scroll acceptance test. Both report `-` while the popup is closed.
 - `cfg=` is the effective widget settings — the `omarchy bar set` surface — plus `fixture:1` while fixture mode is active.
-- `buildTag` (the `b1` prefix) discriminates the running component build. The reload path can serve the previously compiled QML, so if an edit appears not to take effect, check the tag first. `omarchy restart shell` gets a fresh process.
+- `buildTag` (the `b1` prefix) discriminates the running component build — bump it with every `Panel.qml` change. The reload path can serve the previously compiled QML, so if an edit appears not to take effect, check the tag first. `omarchy restart shell` gets a fresh process.
 
 ## License
 
