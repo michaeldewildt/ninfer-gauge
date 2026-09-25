@@ -21,7 +21,8 @@ vm.runInNewContext(source + "\nthis.exports = { fmtTokS, fmtInt, fmtPct, fmtDur,
   + " TEMP_DANGER_C, QUEUE_WAIT_MIN_MS,"
   + " tempTone, fmtTemp, fmtWatts,"
   + " runWaitText, liveTiles, committedTiles, runRow, settingsRows, errorBannerText,"
-  + " BOLT, WARN }", Format)
+  + " isUpdateOutdated, upstreamText,"
+  + " BOLT, WARN, UP }", Format)
 const F = Format.exports
 
 const states = {}
@@ -90,6 +91,53 @@ test("every state fixture renders its own bar string", () => {
   // that it never comes back.
   assert.equal(F.barText(states["busy-single"]), "\u26A1\uFE0E 190 t/s")
   assert.equal(F.barText(states["idle"]), "\u26A1\uFE0E idle")
+  // The provenance mark: the build trails the repo, and the mark rides
+  // beside the phrase exactly the way the queue's mark does.
+  assert.equal(F.barText(states["update-outdated"]), "\u26A1\uFE0E idle \u00B7 \u2191\uFE0E")
+})
+
+test("the out-of-date mark rides in every bar state and tints nothing", () => {
+  const outdated = { installed: "beedffa", upstream: "bace20d",
+                     outdated: true, checked_at_ms: 1 }
+  // The README claims the mark rides "in any state": pin all five, not a
+  // favourite two -- a future refactor special-casing a state must fail here.
+  for (const name of ["down", "starting", "stopping", "queued", "busy", "idle"]) {
+    const s = JSON.parse(JSON.stringify(states[name]))
+    s.update = outdated
+    assert.ok(F.barText(s).endsWith(" \u00B7 \u2191\uFE0E"),
+              name + ": " + F.barText(s))
+  }
+  // Tint stays orthogonal: being behind the repo is a chore, not a fault.
+  const busy = JSON.parse(JSON.stringify(states["busy"]))
+  busy.update = outdated
+  assert.equal(F.barUrgent(busy), F.barUrgent(states["busy"]))
+  // A current build carries no mark, and so does a missing check: the
+  // mark reports the collector's verdict, never a guess.
+  const current = JSON.parse(JSON.stringify(states["idle"]))
+  current.update = { installed: "bace20d", upstream: "bace20d",
+                     outdated: false, checked_at_ms: 1 }
+  assert.equal(F.barText(current), "\u26A1\uFE0E idle")
+  assert.equal(F.barText(states["idle"]), "\u26A1\uFE0E idle")
+})
+
+test("the upstream row names the build's commit, and whether the repo moved", () => {
+  assert.equal(F.upstreamText({ installed: "beedffa", upstream: "bace20d" }),
+               "beedffa \u2192 bace20d")
+  assert.equal(F.upstreamText({ installed: "bace20d", upstream: "bace20d" }),
+               "bace20d \u00B7 current")
+  // Either side unknown: a dash, never a half verdict.
+  assert.equal(F.upstreamText({ installed: "beedffa", upstream: null }), "\u2014")
+  assert.equal(F.upstreamText({}), "\u2014")
+  assert.equal(F.upstreamText(undefined), "\u2014")
+  // The row ends the Settings table, after the endpoint.
+  const rows = F.settingsRows(states["idle"].config,
+                              { installed: "beedffa", upstream: "bace20d" })
+  const last = rows[rows.length - 1]
+  assert.equal(last.label, "Upstream")
+  assert.equal(last.value, "beedffa \u2192 bace20d")
+  // No update section at all: the row still lands, as a dash.
+  const bare = F.settingsRows(states["idle"].config)
+  assert.equal(bare[bare.length - 1].value, "\u2014")
 })
 
 test("a prefill-only bucket reads prefill, not 0.0 t/s", () => {
@@ -297,7 +345,7 @@ test("the fixture runs table newest-first renders through runRow", () => {
 
 // ------------------------------------------------------- popout settings
 
-test("the settings rows are the ten engine arguments, in launch order", () => {
+test("the settings rows are the engine arguments, in launch order, upstream last", () => {
   const rows = F.settingsRows(states["busy"].config)
   // Cross-realm objects from the vm context: compare as JSON strings, the
   // way this file has always compared assembled lines.
@@ -305,7 +353,7 @@ test("the settings rows are the ten engine arguments, in launch order", () => {
     JSON.stringify(rows.map(r => r.label)),
     JSON.stringify(["Model", "Weight profile", "Max context", "KV dtype",
       "KV capacity", "Max concurrency", "MTP draft tokens", "LM head draft",
-      "GPU", "Endpoint"]))
+      "GPU", "Endpoint", "Upstream"]))
   // Tokens keep their separators; every row renders like the rest.
   assert.equal(rows[2].value, "131,072 tokens")
   assert.equal(rows[4].value, "181,568 tokens")
@@ -332,7 +380,7 @@ test("the committed tiles carry the budget readings in the Telemetry tab's tile 
 
 test("a missing config renders dashes, not blanks", () => {
   const rows = F.settingsRows(null)
-  assert.equal(rows.length, 10)
+  assert.equal(rows.length, 11)
   assert.ok(rows.every(r => r.value === "\u2014"))
 })
 
@@ -366,6 +414,8 @@ test("the settings tab renders the invocation the way the collector carries it",
   assert.equal(flat[7], "LM head draft=on")
   assert.equal(flat[8], "GPU=NVIDIA GeForce RTX 5090")
   assert.equal(flat[9], "Endpoint=127.0.0.1:8080")
+  // No update section in this call: the row still lands, as a dash.
+  assert.equal(flat[10], "Upstream=\u2014")
   // A flag not passed reads off; a missing field reads a dash, not a
   // blank or a zero.
   const off = F.settingsRows({ lm_head_draft: false })

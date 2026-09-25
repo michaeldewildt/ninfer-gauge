@@ -1436,7 +1436,7 @@ class TestStateFixtures(unittest.TestCase):
     """Each display fixture must be a state file the widget could really see."""
 
     KEYS = ("schema_version", "generated_at_ms", "server", "gpu", "requests",
-            "config", "runs", "history", "debug")
+            "config", "runs", "update", "history", "debug")
 
     def fixtures(self):
         directory = os.path.join(HERE, "fixtures", "states")
@@ -1458,7 +1458,7 @@ class TestStateFixtures(unittest.TestCase):
                 "kv_capacity_tokens", "max_concurrency", "mtp_draft_tokens",
                 "lm_head_draft", "gpu", "endpoint",
                 "weights_gib", "kv_gib", "host_kv_gib", "host_state_gib"}, name)
-        self.assertEqual(seen, 12)
+        self.assertEqual(seen, 13)
 
     def test_named_state_matches_the_state_field(self):
         for name, stats in self.fixtures():
@@ -1466,7 +1466,8 @@ class TestStateFixtures(unittest.TestCase):
                         "gpu-stale": "busy",
                         "temp-danger": "busy",
                         "unhealthy": "idle",
-                        "journal-stale": "idle"}.get(name[:-5], name[:-5])
+                        "journal-stale": "idle",
+                        "update-outdated": "idle"}.get(name[:-5], name[:-5])
             self.assertEqual(stats["server"]["state"], expected, name)
 
     def test_each_fixture_is_reachable_from_its_own_signals(self):
@@ -1479,6 +1480,104 @@ class TestStateFixtures(unittest.TestCase):
                 collect.derive_state(server["active_state"], server["healthy"],
                                      server["active_requests"], server["queued_requests"]),
                 server["state"], name)
+
+
+class TestUpdateProbes(unittest.TestCase):
+    """The upstream check's two sides: the pkgver's stamped commit and the
+    repo's HEAD. A side that does not carry a commit is unknown, never
+    outdated."""
+
+    PACMAN_QI = (
+        "Name           : ninfer-git\n"
+        "Version        : 20260916.gbeedffa-1\n"
+        "Description    : High-performance single-GPU inference engine\n"
+        "Architecture   : x86_64\n"
+    )
+
+    def test_pkg_commit_comes_out_of_the_pkgver(self):
+        self.assertEqual(collect.parse_pkg_commit(self.PACMAN_QI), "beedffa")
+
+    def test_pkg_commit_is_none_without_a_version_line(self):
+        self.assertIsNone(collect.parse_pkg_commit(
+            "error: package 'ninfer-git' was not found"))
+
+    def test_pkg_commit_is_none_for_a_non_aur_build(self):
+        # A hand-built or distro package carries no stamped commit: the
+        # check reads as unknown, so the bar marks nothing.
+        self.assertIsNone(collect.parse_pkg_commit("Version      : 1.0-1\n"))
+
+    def test_ls_remote_head_reads_the_sha(self):
+        out = "bace20dc70249eed6402b66d4852c6c3f9612905\tHEAD\n"
+        self.assertEqual(collect.parse_ls_remote_head(out),
+                         "bace20dc70249eed6402b66d4852c6c3f9612905")
+
+    def test_ls_remote_head_is_none_on_error_output(self):
+        self.assertIsNone(collect.parse_ls_remote_head(
+            "fatal: repository 'https://github.com/Neroued/ninfer.git/' not found"))
+
+
+class TestUpdateVerdict(unittest.TestCase):
+    """The verdict the feature exists for: both sides required, keep the
+    last verdict on a probe failure, clear it on a successful read that
+    carries no stamp. The display must never mark from a failure."""
+
+    def _cursor(self):
+        return {"update": {"installed": "aaaaaaa", "upstream": "bbbbbbb",
+                           "checked_at_ms": 1000},
+                "update_error": None}
+
+    def test_disagreement_reads_outdated(self):
+        cursor = self._cursor()
+        section = collect.fold_update(
+            cursor, {"commit": "aaaaaaa11", "error": None},
+            {"commit": "bbbbbbb22", "error": None}, 1200)
+        self.assertTrue(section["outdated"])
+        self.assertEqual(section["checked_at_ms"], 1200)
+        self.assertEqual(cursor["update"], {"installed": "aaaaaaa",
+                                            "upstream": "bbbbbbb",
+                                            "checked_at_ms": 1200})
+
+    def test_agreement_reads_current(self):
+        cursor = self._cursor()
+        section = collect.fold_update(
+            cursor, {"commit": "ccccccc11", "error": None},
+            {"commit": "ccccccc22", "error": None}, 1200)
+        self.assertFalse(section["outdated"])
+
+    def test_installed_probe_failure_keeps_the_last_verdict(self):
+        cursor = self._cursor()
+        section = collect.fold_update(
+            cursor, {"commit": None, "error": "no such package"},
+            {"commit": "bbbbbbb22", "error": None}, 1200)
+        self.assertEqual(cursor["update"]["installed"], "aaaaaaa")
+        self.assertTrue(section["outdated"])   # the stale mark stays: it was true
+        self.assertEqual(cursor["update_error"], "no such package")
+
+    def test_network_failure_keeps_the_last_verdict(self):
+        cursor = self._cursor()
+        section = collect.fold_update(
+            cursor, {"commit": "aaaaaaa11", "error": None},
+            {"commit": None, "error": "timed out"}, 1200)
+        self.assertEqual(cursor["update"]["upstream"], "bbbbbbb")
+        self.assertTrue(section["outdated"])
+        self.assertEqual(cursor["update_error"], "timed out")
+
+    def test_successful_read_without_a_stamp_clears_the_verdict(self):
+        # pacman answered and the pkgver carries no commit: a non-AUR build.
+        # The old verdict compared a build that no longer exists.
+        cursor = self._cursor()
+        section = collect.fold_update(
+            cursor, {"commit": None, "error": None},
+            {"commit": "bbbbbbb22", "error": None}, 1200)
+        self.assertEqual(cursor["update"], {})
+        self.assertFalse(section["outdated"])
+        self.assertIsNone(section["installed"])
+
+    def test_project_without_a_check_reads_no_verdict(self):
+        section = collect.project_update(None)
+        self.assertFalse(section["outdated"])
+        self.assertIsNone(section["installed"])
+        self.assertIsNone(section["checked_at_ms"])
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ import subprocess
 import sys
 import time
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 BUCKET_MS = 5000            # throughput lines land on 5 s wall-clock buckets
 HISTORY_BUCKETS = 12        # ... 12 of them = the 60 s sparkline
@@ -52,6 +52,15 @@ NO_UNIT = {"active_state": None, "invocation_id": None, "pid": None, "error": No
 
 DEFAULT_UNIT = "ninfer"
 DEFAULT_PORT = 8080
+# The AUR package builds the raw repo at default-branch HEAD with no patches,
+# stamping the head commit into the pkgver (`<date>.g<sha7>-<rel>`). The
+# installed pkgver and the repo's HEAD are therefore the two sides of the
+# same comparison the AUR build makes -- the gauge only reports whether they
+# still agree.
+SOURCE_PACKAGE = "ninfer-git"
+SOURCE_REPO = "https://github.com/Neroued/ninfer.git"
+COMMIT_LEN = 7                 # pkgver's own convention (cut -c1-7)
+UPSTREAM_EVERY_MS = 3600000    # one ls-remote an hour for "did the repo move"
 
 
 # --------------------------------------------------------------- scalars
@@ -415,6 +424,94 @@ def run_command(command, timeout=5.0):
     return completed.stdout, None
 
 
+PKG_VERSION_RE = re.compile(r"^Version\s*:\s*(\S+)", re.MULTILINE)
+PKG_COMMIT_RE = re.compile(r"\.(g[0-9a-f]{7,40})")
+
+
+def parse_pkg_commit(output):
+    """`pacman -Qi` output -> the commit the pkgver stamps, or None.
+
+    The AUR pkgver is `<date>.g<sha7>-<rel>`; a build that does not carry
+    the commit (a non-AUR install) reads as unknown, never as outdated.
+    """
+    match = PKG_VERSION_RE.search(output or "")
+    if not match:
+        return None
+    commit = PKG_COMMIT_RE.search(match.group(1))
+    return commit.group(1)[1:] if commit else None
+
+
+HEAD_SHA_RE = re.compile(r"^[0-9a-f]{40}\b")
+
+
+def parse_ls_remote_head(output):
+    """`git ls-remote <repo> HEAD` -> the head sha, or None.
+
+    The ref name lands in a column after the sha; only the sha's shape is
+    load-bearing, so annotations and refnames cannot disturb it.
+    """
+    for line in (output or "").splitlines():
+        if HEAD_SHA_RE.match(line):
+            return line.split()[0]
+    return None
+
+
+def probe_installed_commit(package):
+    out, error = run_command(["pacman", "-Qi", package])
+    if out is None:
+        return {"commit": None, "error": error}
+    return {"commit": parse_pkg_commit(out), "error": None}
+
+
+def probe_upstream_head(repo):
+    # 3 s, not 10: this runs inside the 1 Hz, lock-holding collector, and
+    # the display trips its staleness alarm at five missed refreshes -- a
+    # hung ls-remote must not blank the bar to lie about why it is blind.
+    out, error = run_command(["git", "ls-remote", repo, "HEAD"], timeout=3.0)
+    if out is None:
+        return {"commit": None, "error": error}
+    return {"commit": parse_ls_remote_head(out), "error": None}
+
+
+def project_update(update):
+    """The cursor's stored verdict -> the stats.json section.
+
+    Both sides known and disagreeing: the build trails the repo. A missing
+    side (non-AUR install, first check pending) is no verdict: the display
+    marks nothing.
+    """
+    installed = (update or {}).get("installed")
+    upstream = (update or {}).get("upstream")
+    return {
+        "installed": installed,
+        "upstream": upstream,
+        "outdated": bool(installed and upstream and installed != upstream),
+        "checked_at_ms": (update or {}).get("checked_at_ms"),
+    }
+
+
+def fold_update(cursor_state, installed, upstream, now):
+    """One check tick: the probes' results -> the cursor's stored verdict.
+
+    A probe FAILURE keeps the last verdict: an offline hour or a transient
+    network failure is not an outdated build. A SUCCESSFUL read that
+    carries no stamped commit clears it: the build no longer describes the
+    commit the old verdict compared, so the mark would fire on a build that
+    no longer exists. Returns the stats section.
+    """
+    cursor_state["update_error"] = installed.get("error") or upstream.get("error")
+    if installed.get("commit") and upstream.get("commit"):
+        update = {"installed": installed["commit"][:COMMIT_LEN],
+                  "upstream": upstream["commit"][:COMMIT_LEN],
+                  "checked_at_ms": now}
+    elif installed.get("error") is None and installed.get("commit") is None:
+        update = {}
+    else:
+        update = dict(cursor_state.get("update") or {})
+    cursor_state["update"] = update
+    return project_update(update)
+
+
 def probe_unit(unit):
     """ActiveState + InvocationID + MainPID in one call.
 
@@ -466,8 +563,25 @@ def parse_entries(text):
             "message": decode_message(entry.get("MESSAGE")),
             "priority": to_int(entry.get("PRIORITY")),
             "cmdline": entry.get("_CMDLINE") or "",
+            # journald's own writer: what lets a restart catch-up tell the
+            # old invocation's lines from the new process's.
+            "pid": to_int(entry.get("_PID")),
         })
     return entries
+
+
+def filter_entries_to_pid(entries, pid):
+    """Drop the lines the process did not write.
+
+    The restart catch-up window (the journal tail) drags the old
+    invocation's lines across with the new ones; folding them would
+    resurrect a run spanning two req# numberings and count the old
+    process's requests under the new invocation. Lines without a pid are
+    kept: a drop on uncertainty would lose the new process's own head.
+    """
+    if not pid:
+        return entries
+    return [entry for entry in entries if entry.get("pid") in (None, pid)]
 
 
 JOURNAL_BASE = ["journalctl", "--user", "-o", "json", "--no-pager", "-q"]
@@ -599,6 +713,9 @@ def blank_cursor():
         "last_health_at_ms": 0,
         "last_gpu_at_ms": 0,
         "last_gpu_apps_at_ms": 0,
+        "last_update_check_ms": 0,
+        "update": None,         # last good {installed, upstream, checked_at_ms}
+        "update_error": None,   # last check's error: the debug section's standing report
         "last_sample": None,    # newest throughput line, parsed
         "last_sample_at_ms": None,
         "last_activity_at_ms": None,
@@ -610,7 +727,7 @@ def blank_stats():
     return {
         "schema_version": SCHEMA_VERSION,
         "server": {}, "gpu": {}, "requests": {}, "config": None,
-        "runs": [],
+        "runs": [], "update": {},
         "history": {}, "debug": {},
     }
 
@@ -1310,10 +1427,12 @@ def collect(args, now):
         cursor_state["unit"] = unit
         cursor_state["last_unit_at_ms"] = now
     reset = False
+    invocation_changed = False
     if unit["invocation_id"] and unit["invocation_id"] != cursor_state.get("invocation_id"):
         # New process: req# restarts at 1, so carrying the old window over
         # would double-count and invent gaps.
         reset = True
+        invocation_changed = True
         cursor_state["cursor"] = None
         cursor_state["invocation_id"] = unit["invocation_id"]
         cursor_state["buckets"] = {}
@@ -1327,6 +1446,11 @@ def collect(args, now):
     else:
         entries, cursor_reset, journal_error = fetch_journal(args.unit, cursor_state.get("cursor"))
         reset = reset or cursor_reset
+        if invocation_changed:
+            # The catch-up tail still carries the old invocation's lines:
+            # keep only what the new process wrote (its journald _PID), or
+            # the fold would count both invocations under the new one.
+            entries = filter_entries_to_pid(entries, unit.get("pid"))
         if journal_error is None:
             cursor_state["last_journal_ok_ms"] = now
             if not entries and cursor_state.get("cursor"):
@@ -1453,6 +1577,18 @@ def collect(args, now):
     cursor_state["gpu"] = gpu
     stats["gpu"] = dict(gpu, index=args.gpu_index)
 
+    # ---- update section (schema 13)
+    # Did the repo the AUR package builds move past the commit the installed
+    # pkgver stamps? One ls-remote an hour. A replay never probes: the
+    # fixture's output must not depend on the repo.
+    if not args.stdin and now - int(cursor_state.get("last_update_check_ms") or 0) >= UPSTREAM_EVERY_MS:
+        cursor_state["last_update_check_ms"] = now
+        stats["update"] = fold_update(
+            cursor_state, probe_installed_commit(SOURCE_PACKAGE),
+            probe_upstream_head(SOURCE_REPO), now)
+    else:
+        stats["update"] = project_update(cursor_state.get("update"))
+
     # ---- requests section
     accepts = cursor_state.get("accept_pcts") or []
     stats["requests"] = {
@@ -1524,6 +1660,7 @@ def collect(args, now):
         "health_status": (health or {}).get("status"),
         "gpu_error": (gpu_sample or {}).get("error") or (gpu_processes or {}).get("error"),
         "unit_error": unit.get("error"),
+        "update_error": cursor_state.get("update_error"),
         "last_journal_ok_ms": cursor_state.get("last_journal_ok_ms"),
         "collector_ms": now_ms() - _STARTED_MS,
     }

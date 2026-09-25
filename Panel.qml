@@ -28,6 +28,7 @@ Panel {
   readonly property var gpu: snapshot && snapshot.gpu ? snapshot.gpu : null
   readonly property var requests: snapshot && snapshot.requests ? snapshot.requests : null
   readonly property var config: snapshot && snapshot.config ? snapshot.config : null
+  readonly property var update: snapshot && snapshot.update ? snapshot.update : null
   readonly property var generatedAtMs: snapshot ? snapshot.generated_at_ms : null
 
   readonly property bool showGpu: setting("showGpu", true) !== false
@@ -37,7 +38,7 @@ Panel {
   // Discriminates the running component build in the probe output -- the QML
   // disk cache can serve a stale compiled component after a hot reload, and
   // the symptom is a fix that appears not to have landed.
-  readonly property int buildTag: 1
+  readonly property int buildTag: 2
 
   // Popout state. Telemetry is the default tab and Avg the default projection,
   // reset on every open so the popout lands on the live view.
@@ -53,13 +54,15 @@ Panel {
   }
 
   // The Settings rows and the runs table are cached: the data behind them
-  // changes rarely (a boot line, a completed run), and rebuilding those
-  // delegates at 1 Hz would be exactly the churn the Loader exists to
-  // avoid. The runs "When" column still ticks: each row re-reads
-  // generatedAtMs through fmtAge, which is a text binding, not a rebuild.
+  // changes rarely (a boot line, a completed run, an hourly upstream check),
+  // and rebuilding those delegates at 1 Hz would be exactly the churn the
+  // Loader exists to avoid. The runs "When" column still ticks: each row
+  // re-reads generatedAtMs through fmtAge, which is a text binding, not a
+  // rebuild.
   property var configRows: []
-  readonly property string configKey: config ? JSON.stringify(config) : ""
-  function refreshConfigRows() { configRows = Format.settingsRows(config) }
+  readonly property string configKey: (config ? JSON.stringify(config) : "")
+      + "|" + (update ? JSON.stringify(update) : "")
+  function refreshConfigRows() { configRows = Format.settingsRows(config, update) }
   onConfigKeyChanged: refreshConfigRows()
 
   property var runsModel: []
@@ -125,6 +128,11 @@ Panel {
                         "showGpu:" + (root.showGpu ? 1 : 0),
                         "showAccept:" + (root.showAccept ? 1 : 0)].join(",")
                     + (stats.fixtureMode ? ",fixture:1" : ""),
+              // The upstream check: which commit the build is, and whether
+              // the repo moved past it.
+              "up=" + (root.update && root.update.installed && root.update.upstream
+                      ? (root.update.outdated === true ? "outdated" : "current")
+                      : "-"),
               // The popout position: which tab, which projection.
               "tab=" + (root.activeTab === 0 ? "telemetry" : "settings")
                     + "|mode=" + (root.runMode === 0 ? "avg" : "max"),

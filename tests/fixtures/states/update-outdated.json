@@ -17,8 +17,7 @@
     "host_work_ms": null,
     "last_activity_at_ms": 1789072658250,
     "last_sample_at_ms": 1789072656086,
-    "stale": true,
-    "journal_stale": true
+    "stale": false
   },
   "gpu": {
     "stale": false,
@@ -71,10 +70,10 @@
   },
   "runs": [],
   "update": {
-    "installed": null,
-    "upstream": null,
-    "outdated": false,
-    "checked_at_ms": null
+    "installed": "beedffa",
+    "upstream": "bace20d",
+    "outdated": true,
+    "checked_at_ms": 1789033000000
   },
   "history": {
     "window_sec": 60,
@@ -109,7 +108,7 @@
   },
   "debug": {
     "unseen_events": [],
-    "journal_error": "Failed to seek to cursor",
+    "journal_error": null,
     "health_error": null,
     "health_status": null,
     "gpu_error": null,

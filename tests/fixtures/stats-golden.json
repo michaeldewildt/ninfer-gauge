@@ -1,5 +1,5 @@
 {
-  "schema_version": 12,
+  "schema_version": 13,
   "server": {
     "state": "queued",
     "healthy": false,
@@ -49,6 +49,12 @@
     "host_state_gib": 5.84
   },
   "runs": [],
+  "update": {
+    "installed": null,
+    "upstream": null,
+    "outdated": false,
+    "checked_at_ms": null
+  },
   "history": {
     "window_sec": 60,
     "decode_tok_s": [
@@ -73,6 +79,7 @@
     "health_status": null,
     "gpu_error": null,
     "unit_error": null,
+    "update_error": null,
     "last_journal_ok_ms": null
   },
   "generated_at_ms": 1789036660000

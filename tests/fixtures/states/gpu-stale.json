@@ -1,5 +1,5 @@
 {
-  "schema_version": 12,
+  "schema_version": 13,
   "server": {
     "state": "busy",
     "healthy": true,
@@ -96,6 +96,12 @@
       "queue_wait_ms_max": 420.0
     }
   ],
+  "update": {
+    "installed": null,
+    "upstream": null,
+    "outdated": false,
+    "checked_at_ms": null
+  },
   "history": {
     "window_sec": 60,
     "decode_tok_s": [
@@ -120,6 +126,7 @@
     "health_status": null,
     "gpu_error": "nvidia-smi: command not found",
     "unit_error": null,
+    "update_error": null,
     "last_journal_ok_ms": null
   },
   "generated_at_ms": 1789036660000

@@ -206,6 +206,10 @@ VARIANTS = [
     ("queued", queued), ("busy", busy), ("busy-single", busy_single),
     ("idle", idle), ("unhealthy", unhealthy), ("accept-degraded", accept_degraded),
     ("gpu-stale", gpu_stale), ("journal-stale", journal_stale),
+    # The bar's own provenance mark: the build trails the repo it was made from.
+    ("update-outdated", lambda s: (idle(s),
+     s["update"].update(installed="beedffa", upstream="bace20d", outdated=True,
+                        checked_at_ms=1789033000000))),
     # Colour states: each Telemetry tab threshold, exercised once.
     ("temp-danger", lambda s: (busy(s), s["gpu"].update(temp_c=88, watts=402.1))),
 ]

@@ -81,6 +81,10 @@ function serverState(snapshot) {
 // drawing a yellow bolt or a yellow triangle instead of the tinted glyph.
 var BOLT = "\u26A1\uFE0E"
 var WARN = "\u26A0\uFE0E"
+// The mark that the installed build trails the repo it was built from: the
+// same text-presentation rule, so it renders as theme-coloured text, not a
+// fixed-colour emoji.
+var UP = "\u2191\uFE0E"
 
 // The mark and count that report the waiting queue, riding beside the rate
 // instead of replacing it. Appended only for a positive count: a file that
@@ -91,10 +95,23 @@ function queueSuffix(server) {
   return waiting > 0 ? " · " + WARN + " " + waiting : ""
 }
 
+function isUpdateOutdated(snapshot) {
+  return !!(snapshot && snapshot.update && snapshot.update.outdated === true)
+}
+
 // What the state reads as, without the mark. barText prefixes the bolt onto
 // it and the probe reads the button text, so no caller has to take the
 // bar's output apart to get at the phrase.
 function barPhrase(snapshot) {
+  var text = statePhrase(snapshot)
+  // The out-of-date mark rides beside the phrase in every state: being
+  // behind the repo is a chore, not a fault, so it tints nothing and
+  // appends only.
+  if (text !== "" && isUpdateOutdated(snapshot)) text += " \u00B7 " + UP
+  return text
+}
+
+function statePhrase(snapshot) {
   if (!snapshot || !snapshot.server) return ""
   var server = snapshot.server
   var state = serverState(snapshot)
@@ -263,9 +280,20 @@ function committedTiles(config) {
 }
 
 // The Settings tab's lower section: the engine's arguments in launch order,
-// read-only. The endpoint row ends the table -- provenance, not a setting,
-// but it renders like every other row.
-function settingsRows(config) {
+// read-only. The endpoint row carries provenance but renders like every
+// other row; the upstream row ends the table with the rest of the provenance
+// -- which commit the build was made from, and whether the repo moved past
+// it. `update` is the snapshot's own section: both sides unknown reads as
+// a dash (non-AUR install, or the first hourly check is still pending).
+function upstreamText(update) {
+  var u = update || {}
+  var installed = has(u.installed) ? String(u.installed) : null
+  var upstream = has(u.upstream) ? String(u.upstream) : null
+  if (!installed || !upstream) return DASH
+  return installed === upstream ? installed + " \u00B7 current" : installed + " \u2192 " + upstream
+}
+
+function settingsRows(config, update) {
   var c = config || {}
   return [
     { label: "Model",            value: has(c.model) ? String(c.model) : DASH },
@@ -277,7 +305,8 @@ function settingsRows(config) {
     { label: "MTP draft tokens", value: has(c.mtp_draft_tokens) ? fmtInt(c.mtp_draft_tokens) : DASH },
     { label: "LM head draft",    value: c.lm_head_draft === true ? "on" : c.lm_head_draft === false ? "off" : DASH },
     { label: "GPU",              value: has(c.gpu) ? String(c.gpu) : DASH },
-    { label: "Endpoint",         value: has(c.endpoint) ? String(c.endpoint) : DASH }
+    { label: "Endpoint",         value: has(c.endpoint) ? String(c.endpoint) : DASH },
+    { label: "Upstream",         value: upstreamText(update) }
   ]
 }
 
