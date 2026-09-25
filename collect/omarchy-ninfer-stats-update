@@ -570,18 +570,27 @@ def parse_entries(text):
     return entries
 
 
-def filter_entries_to_pid(entries, pid):
-    """Drop the lines the process did not write.
+def filter_entries_to_pid(entries, pid, previous_pid=None):
+    """Drop the lines the new process did not write.
 
     The restart catch-up window (the journal tail) drags the old
     invocation's lines across with the new ones; folding them would
     resurrect a run spanning two req# numberings and count the old
     process's requests under the new invocation. Lines without a pid are
-    kept: a drop on uncertainty would lose the new process's own head.
+    kept: journald stamps every process-written line, so a pidless entry
+    is manager-side and never parses into an event -- and a drop on
+    uncertainty would lose the one writer we cannot identify.
+
+    While the unit is still activating, systemd reports no MainPID yet
+    (0, read as None) though the invocation has already changed: with the
+    new pid unknown, at least the old process's lines can still be named
+    and dropped.
     """
-    if not pid:
-        return entries
-    return [entry for entry in entries if entry.get("pid") in (None, pid)]
+    if pid:
+        return [entry for entry in entries if entry.get("pid") in (None, pid)]
+    if previous_pid:
+        return [entry for entry in entries if entry.get("pid") != previous_pid]
+    return entries
 
 
 JOURNAL_BASE = ["journalctl", "--user", "-o", "json", "--no-pager", "-q"]
@@ -1421,7 +1430,8 @@ def collect(args, now):
     # Live, the probe is a fork+exec plus a D-Bus round trip for properties
     # that only move when the unit starts, stops or fails, so it runs on the
     # same 2 s cadence as /health -- and `down` needs both of them anyway.
-    unit = dict(cursor_state.get("unit") or NO_UNIT)
+    previous_unit = dict(cursor_state.get("unit") or NO_UNIT)
+    unit = dict(previous_unit)
     if not args.stdin and now - int(cursor_state.get("last_unit_at_ms") or 0) >= UNIT_EVERY_MS:
         unit = probe_unit(args.unit)
         cursor_state["unit"] = unit
@@ -1449,8 +1459,11 @@ def collect(args, now):
         if invocation_changed:
             # The catch-up tail still carries the old invocation's lines:
             # keep only what the new process wrote (its journald _PID), or
-            # the fold would count both invocations under the new one.
-            entries = filter_entries_to_pid(entries, unit.get("pid"))
+            # the fold would count both invocations under the new one. While
+            # the unit is activating its pid is still unknown, but the old
+            # process's is -- drop at least its lines.
+            entries = filter_entries_to_pid(entries, unit.get("pid"),
+                                            previous_unit.get("pid"))
         if journal_error is None:
             cursor_state["last_journal_ok_ms"] = now
             if not entries and cursor_state.get("cursor"):

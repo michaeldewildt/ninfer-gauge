@@ -1516,6 +1516,40 @@ class TestUpdateProbes(unittest.TestCase):
             "fatal: repository 'https://github.com/Neroued/ninfer.git/' not found"))
 
 
+class TestRestartFilter(unittest.TestCase):
+    """The restart catch-up must fold the new process's lines only."""
+
+    def test_filter_keeps_only_the_new_process_lines(self):
+        entries = [
+            {"pid": 111, "message": "old"},
+            {"pid": 222, "message": "new"},
+            {"pid": None, "message": "unknown writer"},
+        ]
+        kept = collect.filter_entries_to_pid(entries, 222)
+        self.assertEqual([e["message"] for e in kept], ["new", "unknown writer"])
+
+    def test_filter_is_a_noop_without_a_pid(self):
+        # No MainPID (a unit the probe could not read) and no known old pid:
+        # keep everything rather than drop the new process's own head.
+        entries = [{"pid": 111}, {"pid": None}]
+        self.assertEqual(collect.filter_entries_to_pid(entries, None), entries)
+        self.assertEqual(collect.filter_entries_to_pid(entries, 0), entries)
+
+    def test_filter_drops_the_old_pids_lines_while_activating(self):
+        # The new process has no MainPID yet (the unit is still activating),
+        # but the old process's lines can still be named and dropped.
+        entries = [{"pid": 111, "message": "old"},
+                   {"pid": None, "message": "manager"}]
+        kept = collect.filter_entries_to_pid(entries, None, 111)
+        self.assertEqual([e["message"] for e in kept], ["manager"])
+
+    def test_parse_entries_carries_the_writer_pid(self):
+        # journalctl -o json carries _PID as a string, like every other field.
+        raw = json.dumps({"MESSAGE": "x", "_PID": "4242"})
+        entries = collect.parse_entries(raw)
+        self.assertEqual(entries[0]["pid"], 4242)
+
+
 class TestUpdateVerdict(unittest.TestCase):
     """The verdict the feature exists for: both sides required, keep the
     last verdict on a probe failure, clear it on a successful read that
