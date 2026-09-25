@@ -35,9 +35,15 @@ _spec = importlib.util.spec_from_loader(
 collect = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(collect)
 
-# Pinned just past the fixture's last line, so the 60 s history window has
-# real traffic in it instead of twelve zeroes.
-NOW_MS = 1789036660000
+# Pinned just past the fixture's last line -- derived from the fixture
+# itself, so appending a line cannot silently unpin the clock -- with a
+# small gap, so the 60 s history window has real traffic in it instead of
+# twelve zeroes. (A pin BEHIND the last line is worse than useless: the
+# freshness gate reads a negative age as fresh, and the bar would show a
+# rate from the future.)
+with open(SAMPLE, "rb") as _handle:
+    _lines = [line for line in _handle.read().decode("utf-8").splitlines() if line.strip()]
+NOW_MS = collect.timestamp_from_prefix(_lines[-1].strip()) + 5000
 
 
 def replay():
@@ -61,7 +67,6 @@ def quiet(stats):
     stats["server"].update(active_requests=0, queued_requests=0, decode_tok_s=0.0,
                            prefill_tok_s=None, avg_batch=None, host_pct=None,
                            host_work_ms=None)
-    stats["history"]["decode_tokens"] = [0] * 12
     stats["history"]["decode_tok_s"] = [0.0] * 12
 
 

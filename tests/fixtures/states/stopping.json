@@ -70,20 +70,6 @@
       0.0,
       0.0,
       0.0
-    ],
-    "decode_tokens": [
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0
     ]
   },
   "debug": {
@@ -96,5 +82,5 @@
     "update_error": null,
     "last_journal_ok_ms": null
   },
-  "generated_at_ms": 1789036660000
+  "generated_at_ms": 1789072663250
 }
