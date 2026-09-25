@@ -22,7 +22,7 @@ import subprocess
 import sys
 import time
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 BUCKET_MS = 5000            # throughput lines land on 5 s wall-clock buckets
 HISTORY_BUCKETS = 12        # ... 12 of them = the 60 s sparkline
@@ -736,7 +736,7 @@ def blank_stats():
     return {
         "schema_version": SCHEMA_VERSION,
         "server": {}, "gpu": {}, "requests": {}, "config": None,
-        "runs": [], "update": {},
+        "runs": [], "open_run": None, "update": {},
         "history": {}, "debug": {},
     }
 
@@ -1662,6 +1662,21 @@ def collect(args, now):
         for run in (cursor_state.get("runs") or [])
         if run.get("completed_at_ms")
     ]
+
+    # The run still open, if any: three fields, projected the way the ring
+    # rows are. The table lags the bar by the settle grace -- the bar reads
+    # idle the moment a request finishes, and the run completes 60 s after
+    # the last activity -- so the empty state says what is pending instead
+    # of pretending nothing happened. None once the ring has a row that
+    # explains itself.
+    open_task = cursor_state.get("task")
+    stats["open_run"] = None
+    if open_task:
+        stats["open_run"] = {
+            "first_req": open_task.get("first_req"),
+            "requests": int(open_task.get("requests") or 0),
+            "started_at_ms": open_task.get("started_at_ms"),
+        }
 
     stats["history"] = render_history(cursor_state["buckets"], now)
     stats["generated_at_ms"] = now

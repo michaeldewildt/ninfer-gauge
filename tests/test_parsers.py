@@ -1436,7 +1436,7 @@ class TestStateFixtures(unittest.TestCase):
     """Each display fixture must be a state file the widget could really see."""
 
     KEYS = ("schema_version", "generated_at_ms", "server", "gpu", "requests",
-            "config", "runs", "update", "history", "debug")
+            "config", "runs", "open_run", "update", "history", "debug")
 
     def fixtures(self):
         directory = os.path.join(HERE, "fixtures", "states")

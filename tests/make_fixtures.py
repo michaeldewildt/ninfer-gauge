@@ -107,11 +107,15 @@ def populated(stats):
 def down(stats):
     quiet(stats)
     stats["server"].update(state="down", healthy=False, active_state="inactive")
+    # Down closes the open run on the spot: nothing is pending.
+    stats["open_run"] = None
     stats["gpu"].update(stale=True, process_mem_mib=None)
 
 
 def starting(stats):
     quiet(stats)
+    # Starting closes the open run on the spot: nothing is pending.
+    stats["open_run"] = None
     stats["server"].update(state="starting", healthy=False, active_state="activating",
                            model=None)
     stats["gpu"].update(util_pct=0, mem_mib=1204, mem_total_mib=32607,
@@ -120,6 +124,8 @@ def starting(stats):
 
 def stopping(stats):
     quiet(stats)
+    # Stopping closes the open run on the spot: nothing is pending.
+    stats["open_run"] = None
     stats["server"].update(state="stopping", healthy=True, active_state="deactivating")
 
 

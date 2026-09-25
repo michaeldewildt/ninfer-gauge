@@ -21,7 +21,7 @@ vm.runInNewContext(source + "\nthis.exports = { fmtTokS, fmtInt, fmtPct, fmtDur,
   + " TEMP_DANGER_C, QUEUE_WAIT_MIN_MS,"
   + " tempTone, fmtTemp, fmtWatts,"
   + " runWaitText, liveTiles, committedTiles, runRow, settingsRows, errorBannerText,"
-  + " isUpdateOutdated, upstreamText,"
+  + " isUpdateOutdated, upstreamText, runsEmptyText,"
   + " BOLT, WARN, UP }", Format)
 const F = Format.exports
 
@@ -118,6 +118,18 @@ test("the out-of-date mark rides in every bar state and tints nothing", () => {
                      outdated: false, checked_at_ms: 1 }
   assert.equal(F.barText(current), "\u26A1\uFE0E idle")
   assert.equal(F.barText(states["idle"]), "\u26A1\uFE0E idle")
+})
+
+test("the empty runs table says what is pending, not that nothing happened", () => {
+  // The table lags the bar by the settle grace: while a run is open, the
+  // dash names it instead of reading as a clean slate.
+  assert.equal(F.runsEmptyText(null), "\u2014 (no completed runs since the last boot)")
+  assert.equal(F.runsEmptyText({ requests: 60 }),
+               "\u2014 (run in flight: 60 requests, settles 60 s after the last)")
+  assert.equal(F.runsEmptyText({ requests: 1 }),
+               "\u2014 (run in flight: 1 request, settles 60 s after the last)")
+  assert.equal(F.runsEmptyText({ requests: 2 }),
+               "\u2014 (run in flight: 2 requests, settles 60 s after the last)")
 })
 
 test("the upstream row names the build's commit, and whether the repo moved", () => {

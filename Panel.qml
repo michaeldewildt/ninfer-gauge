@@ -29,6 +29,7 @@ Panel {
   readonly property var requests: snapshot && snapshot.requests ? snapshot.requests : null
   readonly property var config: snapshot && snapshot.config ? snapshot.config : null
   readonly property var update: snapshot && snapshot.update ? snapshot.update : null
+  readonly property var openRun: snapshot && snapshot.open_run ? snapshot.open_run : null
   readonly property var generatedAtMs: snapshot ? snapshot.generated_at_ms : null
 
   readonly property bool showGpu: setting("showGpu", true) !== false
@@ -38,7 +39,7 @@ Panel {
   // Discriminates the running component build in the probe output -- the QML
   // disk cache can serve a stale compiled component after a hot reload, and
   // the symptom is a fix that appears not to have landed.
-  readonly property int buildTag: 2
+  readonly property int buildTag: 3
 
   // Popout state. Telemetry is the default tab and Avg the default projection,
   // reset on every open so the popout lands on the live view.
@@ -133,6 +134,8 @@ Panel {
               "up=" + (root.update && root.update.installed && root.update.upstream
                       ? (root.update.outdated === true ? "outdated" : "current")
                       : "-"),
+              // The run still open (its request count), or - when settled.
+              "run=" + (root.openRun ? String(root.openRun.requests) : "-"),
               // The popout position: which tab, which projection.
               "tab=" + (root.activeTab === 0 ? "telemetry" : "settings")
                     + "|mode=" + (root.runMode === 0 ? "avg" : "max"),
@@ -422,7 +425,7 @@ Panel {
                   Metric {
                     visible: root.runsModel.length === 0
                     label: "Runs"
-                    value: "\u2014 (no completed runs since the last boot)"
+                    value: Format.runsEmptyText(root.openRun)
                   }
                 }
               }

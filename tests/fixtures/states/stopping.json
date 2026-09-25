@@ -1,5 +1,5 @@
 {
-  "schema_version": 13,
+  "schema_version": 14,
   "server": {
     "state": "stopping",
     "healthy": true,
@@ -49,6 +49,7 @@
     "host_state_gib": 5.84
   },
   "runs": [],
+  "open_run": null,
   "update": {
     "installed": null,
     "upstream": null,

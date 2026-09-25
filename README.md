@@ -53,7 +53,7 @@ Two tabs, ~380 px. **Telemetry** is the default; both tabs reset on open. `Tab` 
 
 **Telemetry.** Four live tiles in two columns of two. tok/s and acceptance are the current run's numbers; idle, they read as dashes. GPU temp and watts stay real while idle. Colour sits on the value, not the tile. Temp goes red at 87 °C — three degrees under the 90 °C spec limit of current NVIDIA cards, tuned on an RTX 5090 — in the bar's urgent colour. When the server is down, the banner `⚠ Can't reach ninfer at <endpoint>` replaces the grid. The runs table below stays.
 
-**Previous runs.** One row per settled run, most recent first, up to five. Columns: When · Duration · Tok/s · Accept · Temp · Wait. An Avg/Max toggle switches every stat column; Duration does not switch — it is the run's own span. Temp is red at 87 °C like the live tile. Wait toggles like the rest and is a muted dash when the run's requests never sat in the queue.
+**Previous runs.** One row per settled run, most recent first, up to five. Columns: When · Duration · Tok/s · Accept · Temp · Wait. An Avg/Max toggle switches every stat column; Duration does not switch — it is the run's own span. Temp is red at 87 °C like the live tile. Wait toggles like the rest and is a muted dash when the run's requests never sat in the queue. The table lags the bar by the settle grace — the bar reads idle the moment a request finishes, and the run settles 60 s after the last activity — so while a run is open the empty state reads `— (run in flight: N requests, settles 60 s after the last)` instead of pretending nothing happened.
 
 **Settings.** The committed budget on top — **Weights**, **KV**, **Host KV**, **Host state** — in the engine's own journal vocabulary. It comes from the `weights ready`, `capacity` and `host … pinned` boot lines. Below it, the engine's arguments in launch order under a **Launched with** header: model, weight profile, max context, KV dtype, KV capacity, max concurrency, draft tokens, LM-head draft, GPU, endpoint, and the **Upstream** row that ends the table — which commit the build is, reading `beedffa → bace20d` when the repo moved past it and `bace20d · current` when it has not. Read-only. The tiles hold what the last boot committed — the same whether the server is up or down. A fresh cursor or a purged journal reads as dashes until the boot lines have been seen.
 
@@ -146,12 +146,12 @@ Widget observability from the shell:
 
 ```
 omarchy-shell michaeldewildt.ninfer-gauge probe
-→ b2|bar=⚡︎ 190 t/s|state=busy|urgent=false|dim=false|stale=false|decode=193.4|gpu=42|reqs=1162|age=…ms|cfg=refresh:1000,gpu:0,showGpu:1,showAccept:1|up=current|tab=telemetry|mode=avg|content=353px|scroll=no|open=true
+→ b3|bar=⚡︎ 190 t/s|state=busy|urgent=false|dim=false|stale=false|decode=193.4|gpu=42|reqs=1162|age=…ms|cfg=refresh:1000,gpu:0,showGpu:1,showAccept:1|up=current|run=42|tab=telemetry|mode=avg|content=353px|scroll=no|open=true
 ```
 
-- `up` reports the upstream check: `current` when the installed build's commit is the repo's HEAD, `outdated` when it trails it, `-` while either side is unknown. `content` is the height of the content being shown. A Column ignores invisible children, so it is exactly what is in front of the user. `scroll` reports whether it exceeds the flick — the no-scroll acceptance test. Both report `-` while the popup is closed.
+- `up` reports the upstream check: `current` when the installed build's commit is the repo's HEAD, `outdated` when it trails it, `-` while either side is unknown. `run` is the request count of the run still open (`-` when settled). `content` is the height of the content being shown. A Column ignores invisible children, so it is exactly what is in front of the user. `scroll` reports whether it exceeds the flick — the no-scroll acceptance test. Both report `-` while the popup is closed.
 - `cfg=` is the effective widget settings — the `omarchy bar set` surface — plus `fixture:1` while fixture mode is active.
-- `buildTag` (the `b2` prefix) discriminates the running component build — bump it with every `Panel.qml` change. The reload path can serve the previously compiled QML, so if an edit appears not to take effect, check the tag first. `omarchy restart shell` gets a fresh process.
+- `buildTag` (the `b3` prefix) discriminates the running component build — bump it with every `Panel.qml` change. The reload path can serve the previously compiled QML, so if an edit appears not to take effect, check the tag first. `omarchy restart shell` gets a fresh process.
 
 ## License
 

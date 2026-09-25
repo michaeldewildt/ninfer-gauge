@@ -318,6 +318,17 @@ function errorBannerText(config) {
   return "Can't reach ninfer at " + endpoint
 }
 
+// The previous-runs table's empty state. The table lags the bar by the
+// settle grace -- the bar reads idle the moment a request finishes, and
+// the run completes 60 s after the last activity -- so while a run is
+// open the dash says what is pending, not that nothing happened.
+function runsEmptyText(openRun) {
+  if (!openRun) return "\u2014 (no completed runs since the last boot)"
+  return "\u2014 (run in flight: " + fmtInt(openRun.requests)
+    + " request" + (Number(openRun.requests) === 1 ? "" : "s")
+    + ", settles 60 s after the last)"
+}
+
 
 
 

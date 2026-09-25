@@ -1,5 +1,5 @@
 {
-  "schema_version": 13,
+  "schema_version": 14,
   "server": {
     "state": "idle",
     "healthy": false,
@@ -69,6 +69,11 @@
     "host_state_gib": 5.84
   },
   "runs": [],
+  "open_run": {
+    "first_req": 1,
+    "requests": 1409,
+    "started_at_ms": 1788957390077
+  },
   "update": {
     "installed": null,
     "upstream": null,
