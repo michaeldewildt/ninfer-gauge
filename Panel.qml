@@ -39,7 +39,7 @@ Panel {
   // Discriminates the running component build in the probe output -- the QML
   // disk cache can serve a stale compiled component after a hot reload, and
   // the symptom is a fix that appears not to have landed.
-  readonly property int buildTag: 3
+  readonly property int buildTag: 4
 
   // Popout state. Telemetry is the default tab and Avg the default projection,
   // reset on every open so the popout lands on the live view.
@@ -74,6 +74,21 @@ Panel {
     runsModel = (snapshot && snapshot.runs) ? snapshot.runs : []
   }
   onRunsKeyChanged: refreshRuns()
+
+  // The one action the popout takes. ninfer is the AUR VCS package
+  // `ninfer-git` -- omarchy's AUR updater does not see VCS updates -- and
+  // the running service does not restart itself after the binary swap, so
+  // the update is `yay -Syu ninfer-git` followed by a service restart. It
+  // runs in a visible terminal (the AUR prompt and the sudo password are
+  // both interactive), launched the way the system-update widget launches
+  // its terminal. The command is one quoted argument: the wrapper takes
+  // its command via `"$*"`, so it is the terminal's shell that parses the
+  // `&&`.
+  function launchUpdate() {
+    if (!root.bar) return
+    root.bar.run("omarchy-launch-floating-terminal-with-presentation "
+        + "\"yay -Syu ninfer-git && sudo systemctl restart ninfer\"")
+  }
 
   // Runs-table column geometry: six equal cells. The font is monospace,
   // so right-alignment inside equal widths is the whole alignment story --
@@ -212,11 +227,12 @@ Panel {
               // --------------------------------------------------- tab bar
               //
               // Telemetry (default) / Settings. The active tab is bold with an
-              // underline; the inactive one is muted. No other chrome above
-              // it: status already lives in the toolbar.
+              // underline; the inactive one is muted. The Update button rides
+              // the row's right edge: it acts on the install, not on the data
+              // being tabbed, so it shows on both tabs.
               Item {
                 width: parent.width
-                implicitHeight: Style.space(28)
+                implicitHeight: Math.max(Style.space(28), updateButton.implicitHeight)
 
                 Tab {
                   id: dataTab
@@ -229,6 +245,22 @@ Panel {
                   label: "Settings"
                   index: 1
                   active: root.activeTab === 1
+                }
+
+                Button {
+                  id: updateButton
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "Update"
+                  bordered: true
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.bodySmall
+                  tooltipText: "yay -Syu ninfer-git && sudo systemctl restart ninfer"
+                  onClicked: {
+                    root.launchUpdate()
+                    root.close()
+                  }
                 }
               }
 

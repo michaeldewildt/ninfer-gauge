@@ -51,6 +51,8 @@ The state file is the whole contract between collector and display. It lives at 
 
 Two tabs, ~380 px. **Telemetry** is the default; both tabs reset on open. `Tab` flips tabs, `r` refreshes, `Esc` closes.
 
+An **Update** button rides the tab row's right edge, on both tabs. Clicking it opens a terminal running `yay -Syu ninfer-git && sudo systemctl restart ninfer` — `ninfer-git` is an AUR VCS package, which `omarchy update aur pkgs` does not see, and the running service does not restart itself after the binary swap. The AUR prompt and the sudo password stay interactive in the visible terminal; the popout closes so the terminal is in front.
+
 **Telemetry.** Four live tiles in two columns of two. tok/s and acceptance are the current run's numbers; idle, they read as dashes. GPU temp and watts stay real while idle. Colour sits on the value, not the tile. Temp goes red at 87 °C — three degrees under the 90 °C spec limit of current NVIDIA cards, tuned on an RTX 5090 — in the bar's urgent colour. When the server is down, the banner `⚠ Can't reach ninfer at <endpoint>` replaces the grid. The runs table below stays.
 
 **Previous runs.** One row per settled run, most recent first, up to five. Columns: When · Duration · Tok/s · Accept · Temp · Wait. An Avg/Max toggle switches every stat column; Duration does not switch — it is the run's own span. Temp is red at 87 °C like the live tile. Wait toggles like the rest and is a muted dash when the run's requests never sat in the queue. The table lags the bar by the settle grace — the bar reads idle the moment a request finishes, and the run settles 60 s after the last activity — so while a run is open the empty state reads `— (run in flight: N requests, settles 60 s after the last)` instead of pretending nothing happened.
@@ -64,7 +66,7 @@ Two tabs, ~380 px. **Telemetry** is the default; both tabs reset on open. `Tab` 
 - One box, one server — the gauge watches a single `ninfer` unit.
 - History is the five-run ring — settled runs live in the state file, capped at five, with no longer storage.
 - The journal line format is the contract — the collector parses NInfer's journal lines, so a change in NInfer's logging is a change to the gauge.
-- A view, not a control — everything it touches is read-only, and there is no path from the widget to the server.
+- A view, not a control — the widget itself reads only; its one action (the popout's Update button) opens a visible terminal running the update, and the update is run in that terminal, interactively, by the user.
 
 ## Requirements
 
