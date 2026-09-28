@@ -51,7 +51,7 @@ The state file is the whole contract between collector and display. It lives at 
 
 Two tabs, ~380 px. **Telemetry** is the default; both tabs reset on open. `Tab` flips tabs, `r` refreshes, `Esc` closes.
 
-An update icon (⟳, tooltip **Update NInfer**) rides the tab row's right edge, on both tabs. Clicking it opens a terminal running `yay -Syu ninfer-git && sudo systemctl restart ninfer` — `ninfer-git` is an AUR VCS package, which `omarchy update aur pkgs` does not see, and the running service does not restart itself after the binary swap. The AUR prompt and the sudo password stay interactive in the visible terminal; the popout closes so the terminal is in front.
+An update icon (⇩, the same download glyph the first-party system-update widget uses; tooltip **Update NInfer**) rides the tab row's right edge, on both tabs. Clicking it opens a terminal running `yay -Syu ninfer-git && sudo systemctl restart ninfer`. The named-package form updates ninfer-git only, never the rest of the system. `ninfer-git` is an AUR VCS package, which `omarchy update aur pkgs` does not see, and the running service does not restart itself after the binary swap. The AUR prompt and the sudo password stay interactive in the visible terminal; the popout closes so the terminal is in front.
 
 **Telemetry.** Four live tiles in two columns of two. tok/s and acceptance are the current run's numbers; idle, they read as dashes. GPU temp and watts stay real while idle. Colour sits on the value, not the tile. Temp goes red at 87 °C — three degrees under the 90 °C spec limit of current NVIDIA cards, tuned on an RTX 5090 — in the bar's urgent colour. When the server is down, the banner `⚠ Can't reach ninfer at <endpoint>` replaces the grid. The runs table below stays.
 

@@ -39,7 +39,7 @@ Panel {
   // Discriminates the running component build in the probe output -- the QML
   // disk cache can serve a stale compiled component after a hot reload, and
   // the symptom is a fix that appears not to have landed.
-  readonly property int buildTag: 6
+  readonly property int buildTag: 7
 
   // Popout state. Telemetry is the default tab and Avg the default projection,
   // reset on every open so the popout lands on the live view.
@@ -252,7 +252,7 @@ Panel {
                   anchors.right: parent.right
                   anchors.verticalCenter: parent.verticalCenter
                   text: ""
-                  iconText: "\uf0e2"
+                  iconText: "\uf021"
                   bordered: true
                   foreground: root.foreground
                   fontFamily: root.fontFamily
