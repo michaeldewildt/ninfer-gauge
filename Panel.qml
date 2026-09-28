@@ -39,7 +39,7 @@ Panel {
   // Discriminates the running component build in the probe output -- the QML
   // disk cache can serve a stale compiled component after a hot reload, and
   // the symptom is a fix that appears not to have landed.
-  readonly property int buildTag: 4
+  readonly property int buildTag: 5
 
   // Popout state. Telemetry is the default tab and Avg the default projection,
   // reset on every open so the popout lands on the live view.
@@ -227,8 +227,8 @@ Panel {
               // --------------------------------------------------- tab bar
               //
               // Telemetry (default) / Settings. The active tab is bold with an
-              // underline; the inactive one is muted. The Update button rides
-              // the row's right edge: it acts on the install, not on the data
+              // underline; the inactive one is muted. The Update engine button
+              // rides the row's right edge: it acts on the install, not on the data
               // being tabbed, so it shows on both tabs.
               Item {
                 width: parent.width
@@ -251,12 +251,12 @@ Panel {
                   id: updateButton
                   anchors.right: parent.right
                   anchors.verticalCenter: parent.verticalCenter
-                  text: "Update"
+                  text: "Update engine"
                   bordered: true
                   foreground: root.foreground
                   fontFamily: root.fontFamily
                   fontSize: Style.font.bodySmall
-                  tooltipText: "yay -Syu ninfer-git && sudo systemctl restart ninfer"
+                  tooltipText: "Rebuild the NInfer engine from the AUR and restart the service:\nyay -Syu ninfer-git && sudo systemctl restart ninfer"
                   onClicked: {
                     root.launchUpdate()
                     root.close()
