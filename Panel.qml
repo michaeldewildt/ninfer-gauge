@@ -39,7 +39,7 @@ Panel {
   // Discriminates the running component build in the probe output -- the QML
   // disk cache can serve a stale compiled component after a hot reload, and
   // the symptom is a fix that appears not to have landed.
-  readonly property int buildTag: 7
+  readonly property int buildTag: 8
 
   // Popout state. Telemetry is the default tab and Avg the default projection,
   // reset on every open so the popout lands on the live view.
@@ -79,15 +79,17 @@ Panel {
   // `ninfer-git` -- omarchy's AUR updater does not see VCS updates -- and
   // the running service does not restart itself after the binary swap, so
   // the update is `yay -Syu ninfer-git` followed by a service restart. It
-  // runs in a visible terminal (the AUR prompt and the sudo password are
-  // both interactive), launched the way the system-update widget launches
-  // its terminal. The command is one quoted argument: the wrapper takes
-  // its command via `"$*"`, so it is the terminal's shell that parses the
-  // `&&`.
+  // runs in a visible terminal (the AUR prompt is interactive). The
+  // service is a user unit (~/.config/systemd/user/ninfer.service), so the
+  // restart is `systemctl --user restart ninfer` -- system-scope
+  // `sudo systemctl restart ninfer` fails with "Unit not found" and leaves
+  // the running process on the old binary. The command is one quoted
+  // argument: the wrapper takes its command via `"$*"`, so it is the
+  // terminal's shell that parses the `&&`.
   function launchUpdate() {
     if (!root.bar) return
     root.bar.run("omarchy-launch-floating-terminal-with-presentation "
-        + "\"yay -Syu ninfer-git && sudo systemctl restart ninfer\"")
+        + "\"yay -Syu ninfer-git && systemctl --user restart ninfer\"")
   }
 
   // Runs-table column geometry: six equal cells. The font is monospace,
