@@ -39,7 +39,7 @@ Panel {
   // Discriminates the running component build in the probe output -- the QML
   // disk cache can serve a stale compiled component after a hot reload, and
   // the symptom is a fix that appears not to have landed.
-  readonly property int buildTag: 8
+  readonly property int buildTag: 9
 
   // Popout state. Telemetry is the default tab and Avg the default projection,
   // reset on every open so the popout lands on the live view.
@@ -229,12 +229,16 @@ Panel {
               // --------------------------------------------------- tab bar
               //
               // Telemetry (default) / Settings. The active tab is bold with an
-              // underline; the inactive one is muted. The Update engine button
-              // rides the row's right edge: it acts on the install, not on the data
-              // being tabbed, so it shows on both tabs.
+              // underline; the inactive one is muted. The update icon rides the
+              // row's right edge: it acts on the install, not on the data being
+              // tabbed, so it shows on both tabs -- and only while the installed
+              // build trails upstream (the same verdict that lights the bar's
+              // up-arrow), the way the first-party system-update widget hides
+              // itself when there is nothing to update.
               Item {
                 width: parent.width
-                implicitHeight: Math.max(Style.space(28), updateButton.implicitHeight)
+                implicitHeight: Math.max(Style.space(28),
+                        updateButton.visible ? updateButton.implicitHeight : 0)
 
                 Tab {
                   id: dataTab
@@ -253,6 +257,7 @@ Panel {
                   id: updateButton
                   anchors.right: parent.right
                   anchors.verticalCenter: parent.verticalCenter
+                  visible: root.update && root.update.outdated === true
                   text: ""
                   iconText: "\uf021"
                   bordered: true
