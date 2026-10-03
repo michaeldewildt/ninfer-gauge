@@ -62,7 +62,7 @@ Two tabs, ~380 px. **Telemetry** is the default; both tabs reset on open. `Tab` 
 - One box, one server — the gauge watches a single `ninfer` unit.
 - History is the five-run ring — settled runs live in the state file, capped at five, with no longer storage.
 - The journal line format is the contract — the collector parses NInfer's journal lines, so a change in NInfer's logging is a change to the gauge.
-- A view, not a control — everything it touches is read-only, and there is no path from the widget to the server.
+- A view, not a control — the widget reads only; its two actions (the popout's stop and start buttons) open a visible terminal running `systemctl --user stop ninfer` or `systemctl --user start ninfer`, and the command runs in that terminal, interactively, by the user.
 
 ## Requirements
 
