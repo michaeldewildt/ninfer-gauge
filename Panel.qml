@@ -33,11 +33,13 @@ Panel {
   readonly property bool showGpu: setting("showGpu", true) !== false
   readonly property bool showAccept: setting("showAccept", true) !== false
   readonly property bool stateDown: !!server && server.state === "down"
+  readonly property bool stateUp: !!server && server.state !== "down"
+      && server.state !== "starting" && server.state !== "stopping"
 
   // Discriminates the running component build in the probe output -- the QML
   // disk cache can serve a stale compiled component after a hot reload, and
   // the symptom is a fix that appears not to have landed.
-  readonly property int buildTag: 1
+  readonly property int buildTag: 4
 
   // Popout state. Telemetry is the default tab and Avg the default projection,
   // reset on every open so the popout lands on the live view.
@@ -70,6 +72,25 @@ Panel {
     runsModel = (snapshot && snapshot.runs) ? snapshot.runs : []
   }
   onRunsKeyChanged: refreshRuns()
+
+  // Stop and start the server: the same visible-terminal shape as a
+  // one-action popout -- the command runs in the terminal, interactively,
+  // by the user. The --user form is load-bearing: system-scope
+  // `systemctl stop ninfer` fails with "Unit not found" (the unit is a
+  // user unit, not a system unit). The command is one quoted argument:
+  // the wrapper takes it via `"$*"`, so it is the terminal's shell that
+  // parses the `&&`. `systemctl` is silent on success, so the echo is the
+  // terminal's whole message: what the user is about to run.
+  function launchStop() {
+    if (!root.bar) return
+    root.bar.run("omarchy-launch-floating-terminal-with-presentation "
+        + "\"echo 'Stopping ninfer…' && systemctl --user stop ninfer\"")
+  }
+  function launchStart() {
+    if (!root.bar) return
+    root.bar.run("omarchy-launch-floating-terminal-with-presentation "
+        + "\"echo 'Starting ninfer…' && systemctl --user start ninfer\"")
+  }
 
   // Runs-table column geometry: six equal cells. The font is monospace,
   // so right-alignment inside equal widths is the whole alignment story --
@@ -201,11 +222,14 @@ Panel {
               // --------------------------------------------------- tab bar
               //
               // Telemetry (default) / Settings. The active tab is bold with an
-              // underline; the inactive one is muted. No other chrome above
-              // it: status already lives in the toolbar.
+              // underline; the inactive one is muted. The stop/start toggle
+              // rides the row's right edge: it acts on the server, not on the
+              // data being tabbed, so it shows on both tabs. One face at a
+              // time -- stop while the server is up, start while it is down.
               Item {
                 width: parent.width
-                implicitHeight: Style.space(28)
+                implicitHeight: Math.max(Style.space(28),
+                        powerButton.visible ? powerButton.height : 0)
 
                 Tab {
                   id: dataTab
@@ -218,6 +242,30 @@ Panel {
                   label: "Settings"
                   index: 1
                   active: root.activeTab === 1
+                }
+
+                Button {
+                  id: powerButton
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  // Compact icon button: the default control size dwarfs the
+                  // tab row, so the square is pinned to 24 px and the row
+                  // height math reads `height`, not `implicitHeight`.
+                  width: Style.space(24)
+                  height: Style.space(24)
+                  visible: !!root.snapshot && (root.stateDown || root.stateUp)
+                  text: ""
+                  iconText: root.stateDown ? "\uf04b" : "\uf04d"
+                  bordered: true
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.bodySmall
+                  tooltipText: root.stateDown ? "Start NInfer" : "Stop NInfer"
+                  onClicked: {
+                    if (root.stateDown) root.launchStart()
+                    else root.launchStop()
+                    root.close()
+                  }
                 }
               }
 
