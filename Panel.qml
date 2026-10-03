@@ -39,7 +39,7 @@ Panel {
   // Discriminates the running component build in the probe output -- the QML
   // disk cache can serve a stale compiled component after a hot reload, and
   // the symptom is a fix that appears not to have landed.
-  readonly property int buildTag: 3
+  readonly property int buildTag: 4
 
   // Popout state. Telemetry is the default tab and Avg the default projection,
   // reset on every open so the popout lands on the live view.
@@ -78,17 +78,18 @@ Panel {
   // by the user. The --user form is load-bearing: system-scope
   // `systemctl stop ninfer` fails with "Unit not found" (the unit is a
   // user unit, not a system unit). The command is one quoted argument:
-  // the wrapper takes its command via `"$*"`, so it is the terminal's
-  // shell that parses it.
+  // the wrapper takes it via `"$*"`, so it is the terminal's shell that
+  // parses the `&&`. `systemctl` is silent on success, so the echo is the
+  // terminal's whole message: what the user is about to run.
   function launchStop() {
     if (!root.bar) return
     root.bar.run("omarchy-launch-floating-terminal-with-presentation "
-        + "\"systemctl --user stop ninfer\"")
+        + "\"echo 'Stopping ninfer…' && systemctl --user stop ninfer\"")
   }
   function launchStart() {
     if (!root.bar) return
     root.bar.run("omarchy-launch-floating-terminal-with-presentation "
-        + "\"systemctl --user start ninfer\"")
+        + "\"echo 'Starting ninfer…' && systemctl --user start ninfer\"")
   }
 
   // Runs-table column geometry: six equal cells. The font is monospace,
