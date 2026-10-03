@@ -39,7 +39,7 @@ Panel {
   // Discriminates the running component build in the probe output -- the QML
   // disk cache can serve a stale compiled component after a hot reload, and
   // the symptom is a fix that appears not to have landed.
-  readonly property int buildTag: 2
+  readonly property int buildTag: 3
 
   // Popout state. Telemetry is the default tab and Avg the default projection,
   // reset on every open so the popout lands on the live view.
@@ -228,7 +228,7 @@ Panel {
               Item {
                 width: parent.width
                 implicitHeight: Math.max(Style.space(28),
-                        powerButton.visible ? powerButton.implicitHeight : 0)
+                        powerButton.visible ? powerButton.height : 0)
 
                 Tab {
                   id: dataTab
@@ -247,6 +247,11 @@ Panel {
                   id: powerButton
                   anchors.right: parent.right
                   anchors.verticalCenter: parent.verticalCenter
+                  // Compact icon button: the default control size dwarfs the
+                  // tab row, so the square is pinned to 24 px and the row
+                  // height math reads `height`, not `implicitHeight`.
+                  width: Style.space(24)
+                  height: Style.space(24)
                   visible: !!root.snapshot && (root.stateDown || root.stateUp)
                   text: ""
                   iconText: root.stateDown ? "\uf04b" : "\uf04d"
