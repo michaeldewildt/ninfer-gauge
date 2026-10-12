@@ -28,6 +28,8 @@ Panel {
   readonly property var gpu: snapshot && snapshot.gpu ? snapshot.gpu : null
   readonly property var requests: snapshot && snapshot.requests ? snapshot.requests : null
   readonly property var config: snapshot && snapshot.config ? snapshot.config : null
+  readonly property var update: snapshot && snapshot.update ? snapshot.update : null
+  readonly property var openRun: snapshot && snapshot.open_run ? snapshot.open_run : null
   readonly property var generatedAtMs: snapshot ? snapshot.generated_at_ms : null
 
   readonly property bool showGpu: setting("showGpu", true) !== false
@@ -39,7 +41,7 @@ Panel {
   // Discriminates the running component build in the probe output -- the QML
   // disk cache can serve a stale compiled component after a hot reload, and
   // the symptom is a fix that appears not to have landed.
-  readonly property int buildTag: 4
+  readonly property int buildTag: 10
 
   // Popout state. Telemetry is the default tab and Avg the default projection,
   // reset on every open so the popout lands on the live view.
@@ -55,13 +57,15 @@ Panel {
   }
 
   // The Settings rows and the runs table are cached: the data behind them
-  // changes rarely (a boot line, a completed run), and rebuilding those
-  // delegates at 1 Hz would be exactly the churn the Loader exists to
-  // avoid. The runs "When" column still ticks: each row re-reads
-  // generatedAtMs through fmtAge, which is a text binding, not a rebuild.
+  // changes rarely (a boot line, a completed run, an hourly upstream check),
+  // and rebuilding those delegates at 1 Hz would be exactly the churn the
+  // Loader exists to avoid. The runs "When" column still ticks: each row
+  // re-reads generatedAtMs through fmtAge, which is a text binding, not a
+  // rebuild.
   property var configRows: []
-  readonly property string configKey: config ? JSON.stringify(config) : ""
-  function refreshConfigRows() { configRows = Format.settingsRows(config) }
+  readonly property string configKey: (config ? JSON.stringify(config) : "")
+      + "|" + (update ? JSON.stringify(update) : "")
+  function refreshConfigRows() { configRows = Format.settingsRows(config, update) }
   onConfigKeyChanged: refreshConfigRows()
 
   property var runsModel: []
@@ -90,6 +94,23 @@ Panel {
     if (!root.bar) return
     root.bar.run("omarchy-launch-floating-terminal-with-presentation "
         + "\"echo 'Starting ninfer…' && systemctl --user start ninfer\"")
+  }
+
+  // The popout's update action. ninfer is the AUR VCS package
+  // `ninfer-git` -- omarchy's AUR updater does not see VCS updates -- and
+  // the running service does not restart itself after the binary swap, so
+  // the update is `yay -Syu ninfer-git` followed by a service restart. It
+  // runs in a visible terminal (the AUR prompt is interactive). The
+  // service is a user unit (~/.config/systemd/user/ninfer.service), so the
+  // restart is `systemctl --user restart ninfer` -- system-scope
+  // `sudo systemctl restart ninfer` fails with "Unit not found" and leaves
+  // the running process on the old binary. The command is one quoted
+  // argument: the wrapper takes its command via `"$*"`, so it is the
+  // terminal's shell that parses the `&&`.
+  function launchUpdate() {
+    if (!root.bar) return
+    root.bar.run("omarchy-launch-floating-terminal-with-presentation "
+        + "\"yay -Syu ninfer-git && systemctl --user restart ninfer\"")
   }
 
   // Runs-table column geometry: six equal cells. The font is monospace,
@@ -146,6 +167,13 @@ Panel {
                         "showGpu:" + (root.showGpu ? 1 : 0),
                         "showAccept:" + (root.showAccept ? 1 : 0)].join(",")
                     + (stats.fixtureMode ? ",fixture:1" : ""),
+              // The upstream check: which commit the build is, and whether
+              // the repo moved past it.
+              "up=" + (root.update && root.update.installed && root.update.upstream
+                      ? (root.update.outdated === true ? "outdated" : "current")
+                      : "-"),
+              // The run still open (its request count), or - when settled.
+              "run=" + (root.openRun ? String(root.openRun.requests) : "-"),
               // The popout position: which tab, which projection.
               "tab=" + (root.activeTab === 0 ? "telemetry" : "settings")
                     + "|mode=" + (root.runMode === 0 ? "avg" : "max"),
@@ -222,14 +250,19 @@ Panel {
               // --------------------------------------------------- tab bar
               //
               // Telemetry (default) / Settings. The active tab is bold with an
-              // underline; the inactive one is muted. The stop/start toggle
-              // rides the row's right edge: it acts on the server, not on the
-              // data being tabbed, so it shows on both tabs. One face at a
-              // time -- stop while the server is up, start while it is down.
+              // underline; the inactive one is muted. The row's right edge
+              // carries the two actions, neither of which tabs the data: the
+              // stop/start toggle acts on the server -- one face at a time,
+              // stop while the server is up, start while it is down -- and
+              // the update icon acts on the install, shown only while the
+              // installed build trails upstream (the same verdict that lights
+              // the bar's up-arrow), the way the first-party system-update
+              // widget hides itself when there is nothing to update.
               Item {
                 width: parent.width
                 implicitHeight: Math.max(Style.space(28),
-                        powerButton.visible ? powerButton.height : 0)
+                        powerButton.visible ? powerButton.height : 0,
+                        updateButton.visible ? updateButton.implicitHeight : 0)
 
                 Tab {
                   id: dataTab
@@ -244,27 +277,50 @@ Panel {
                   active: root.activeTab === 1
                 }
 
-                Button {
-                  id: powerButton
+                // The row's right edge: stop/start, and the update icon while
+                // the build trails upstream. A Row keeps them side by side --
+                // both anchored right they would stack.
+                Row {
                   anchors.right: parent.right
                   anchors.verticalCenter: parent.verticalCenter
-                  // Compact icon button: the default control size dwarfs the
-                  // tab row, so the square is pinned to 24 px and the row
-                  // height math reads `height`, not `implicitHeight`.
-                  width: Style.space(24)
-                  height: Style.space(24)
-                  visible: !!root.snapshot && (root.stateDown || root.stateUp)
-                  text: ""
-                  iconText: root.stateDown ? "\uf04b" : "\uf04d"
-                  bordered: true
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                  fontSize: Style.font.bodySmall
-                  tooltipText: root.stateDown ? "Start NInfer" : "Stop NInfer"
-                  onClicked: {
-                    if (root.stateDown) root.launchStart()
-                    else root.launchStop()
-                    root.close()
+                  spacing: Style.space(8)
+
+                  Button {
+                    // Compact icon button: the default control size dwarfs the
+                    // tab row, so the square is pinned to 24 px and the row
+                    // height math reads `height`, not `implicitHeight`.
+                    id: powerButton
+                    width: Style.space(24)
+                    height: Style.space(24)
+                    visible: !!root.snapshot && (root.stateDown || root.stateUp)
+                    text: ""
+                    iconText: root.stateDown ? "\uf04b" : "\uf04d"
+                    bordered: true
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    fontSize: Style.font.bodySmall
+                    tooltipText: root.stateDown ? "Start NInfer" : "Stop NInfer"
+                    onClicked: {
+                      if (root.stateDown) root.launchStart()
+                      else root.launchStop()
+                      root.close()
+                    }
+                  }
+
+                  Button {
+                    id: updateButton
+                    visible: root.update && root.update.outdated === true
+                    text: ""
+                    iconText: "\uf021"
+                    bordered: true
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    fontSize: Style.font.bodySmall
+                    tooltipText: "Update NInfer"
+                    onClicked: {
+                      root.launchUpdate()
+                      root.close()
+                    }
                   }
                 }
               }
@@ -462,7 +518,7 @@ Panel {
                   Metric {
                     visible: root.runsModel.length === 0
                     label: "Runs"
-                    value: "\u2014 (no completed runs since the last boot)"
+                    value: Format.runsEmptyText(root.openRun)
                   }
                 }
               }
