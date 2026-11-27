@@ -1,5 +1,5 @@
 {
-  "schema_version": 12,
+  "schema_version": 14,
   "server": {
     "state": "queued",
     "healthy": true,
@@ -69,20 +69,31 @@
     "host_state_gib": 5.84
   },
   "runs": [],
+  "open_run": {
+    "first_req": 1,
+    "requests": 1409,
+    "started_at_ms": 1788957390077
+  },
+  "update": {
+    "installed": null,
+    "upstream": null,
+    "outdated": false,
+    "checked_at_ms": null
+  },
   "history": {
     "window_sec": 60,
     "decode_tok_s": [
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
+      141.6,
+      178.0,
+      152.6,
+      170.4,
+      201.0,
+      145.8,
+      150.2,
+      150.2,
+      210.4,
+      181.0,
+      224.8,
       0.0
     ]
   },
@@ -93,7 +104,8 @@
     "health_status": null,
     "gpu_error": null,
     "unit_error": null,
+    "update_error": null,
     "last_journal_ok_ms": null
   },
-  "generated_at_ms": 1789036660000
+  "generated_at_ms": 1789072663250
 }

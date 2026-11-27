@@ -1,5 +1,5 @@
 {
-  "schema_version": 12,
+  "schema_version": 14,
   "server": {
     "state": "busy",
     "healthy": true,
@@ -70,7 +70,7 @@
   },
   "runs": [
     {
-      "completed_at_ms": 1789036540000,
+      "completed_at_ms": 1789072543250,
       "duration_ms": 48000,
       "when_label": "2m ago",
       "tok_s_avg": 187.2,
@@ -83,7 +83,7 @@
       "queue_wait_ms_max": 1800.0
     },
     {
-      "completed_at_ms": 1789035940000,
+      "completed_at_ms": 1789071943250,
       "duration_ms": 300000,
       "when_label": "12m ago",
       "tok_s_avg": 176.9,
@@ -96,7 +96,7 @@
       "queue_wait_ms_max": null
     },
     {
-      "completed_at_ms": 1789031260000,
+      "completed_at_ms": 1789067263250,
       "duration_ms": 920000,
       "when_label": "2h ago",
       "tok_s_avg": 152.6,
@@ -109,20 +109,31 @@
       "queue_wait_ms_max": 420.0
     }
   ],
+  "open_run": {
+    "first_req": 1,
+    "requests": 1409,
+    "started_at_ms": 1788957390077
+  },
+  "update": {
+    "installed": null,
+    "upstream": null,
+    "outdated": false,
+    "checked_at_ms": null
+  },
   "history": {
     "window_sec": 60,
     "decode_tok_s": [
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
+      141.6,
+      178.0,
+      152.6,
+      170.4,
+      201.0,
+      145.8,
+      150.2,
+      150.2,
+      210.4,
+      181.0,
+      224.8,
       0.0
     ]
   },
@@ -133,7 +144,8 @@
     "health_status": null,
     "gpu_error": null,
     "unit_error": null,
+    "update_error": null,
     "last_journal_ok_ms": null
   },
-  "generated_at_ms": 1789036660000
+  "generated_at_ms": 1789072663250
 }
