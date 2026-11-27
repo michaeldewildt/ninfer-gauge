@@ -41,7 +41,7 @@ Panel {
   // Discriminates the running component build in the probe output -- the QML
   // disk cache can serve a stale compiled component after a hot reload, and
   // the symptom is a fix that appears not to have landed.
-  readonly property int buildTag: 10
+  readonly property int buildTag: 11
 
   // Popout state. Telemetry is the default tab and Avg the default projection,
   // reset on every open so the popout lands on the live view.
@@ -260,9 +260,7 @@ Panel {
               // widget hides itself when there is nothing to update.
               Item {
                 width: parent.width
-                implicitHeight: Math.max(Style.space(28),
-                        powerButton.visible ? powerButton.height : 0,
-                        updateButton.visible ? updateButton.implicitHeight : 0)
+                implicitHeight: Math.max(dataTab.implicitHeight, tabActions.implicitHeight)
 
                 Tab {
                   id: dataTab
@@ -281,17 +279,15 @@ Panel {
                 // the build trails upstream. A Row keeps them side by side --
                 // both anchored right they would stack.
                 Row {
+                  id: tabActions
+                  readonly property int buttonSize: Style.space(24)
                   anchors.right: parent.right
                   anchors.verticalCenter: parent.verticalCenter
                   spacing: Style.space(8)
 
                   Button {
-                    // Compact icon button: the default control size dwarfs the
-                    // tab row, so the square is pinned to 24 px and the row
-                    // height math reads `height`, not `implicitHeight`.
-                    id: powerButton
-                    width: Style.space(24)
-                    height: Style.space(24)
+                    width: tabActions.buttonSize
+                    height: width
                     visible: !!root.snapshot && (root.stateDown || root.stateUp)
                     text: ""
                     iconText: root.stateDown ? "\uf04b" : "\uf04d"
@@ -308,7 +304,8 @@ Panel {
                   }
 
                   Button {
-                    id: updateButton
+                    width: tabActions.buttonSize
+                    height: width
                     visible: root.update && root.update.outdated === true
                     text: ""
                     iconText: "\uf021"
